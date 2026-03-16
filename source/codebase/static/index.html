@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PolySINT - Prediction Market Intelligence</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-in { animation: fadeIn 0.3s ease-out forwards; }
+        .bg-polysint { background-color: #10b981; }
+        .text-polysint { color: #10b981; }
+        .border-polysint { border-color: #10b981; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 min-h-screen">
+    <div class="container mx-auto px-4 py-8 max-w-6xl">
+        <!-- Header -->
+        <div class="flex items-center justify-between mb-8">
+            <div>
+                <h1 class="text-3xl font-bold text-white">PolySINT</h1>
+                <p class="text-gray-500 text-sm">Prediction Market Intelligence Dashboard</p>
+            </div>
+            <div class="flex items-center gap-4">
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" id="researchToggle" onchange="onResearchToggle()" class="sr-only">
+                    <div class="relative w-10 h-5 bg-gray-700 rounded-full transition-colors" id="toggleTrack">
+                        <div class="absolute left-0.5 top-0.5 w-4 h-4 bg-gray-400 rounded-full transition-transform" id="toggleThumb"></div>
+                    </div>
+                    <span id="researchToggleLabel" class="text-xs text-gray-500 font-mono">Web Research: OFF</span>
+                </label>
+            </div>
+        </div>
+
+        <!-- Toolbar -->
+        <div class="bg-gray-800 rounded-lg p-4 mb-6 border border-gray-700">
+            <div class="flex flex-wrap items-center gap-4">
+                <div class="flex-1 min-w-64">
+                    <input type="text" id="searchInput" placeholder="Search markets... (press Enter)"
+                        class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-polysint">
+                </div>
+                <div class="flex items-center gap-2 text-xs text-gray-500">
+                    <span>Vol:</span>
+                    <input type="number" id="volMin" placeholder="Min" 
+                        class="w-20 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs focus:outline-none focus:border-polysint">
+                    <span>-</span>
+                    <input type="number" id="volMax" placeholder="Max"
+                        class="w-20 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs focus:outline-none focus:border-polysint">
+                </div>
+                <div id="refreshCountdown" class="text-xs text-gray-600 font-mono"></div>
+                <div id="marketCounter" class="text-xs text-gray-500 font-mono"></div>
+            </div>
+        </div>
+
+        <!-- Markets Table -->
+        <div class="bg-gray-800 rounded-lg border border-gray-700 mb-8 overflow-hidden">
+            <table class="w-full">
+                <thead class="bg-gray-700/50 text-gray-400 text-xs uppercase">
+                    <tr>
+                        <th class="px-4 py-3 text-left">Market</th>
+                        <th class="px-4 py-3 text-left w-24">Shift</th>
+                        <th class="px-4 py-3 text-left w-28">Volume</th>
+                        <th class="px-4 py-3 text-right w-28">Action</th>
+                    </tr>
+                </thead>
+                <tbody id="marketsTable">
+                    <tr>
+                        <td colspan="4" class="py-16 text-center">
+                            <div class="flex flex-col items-center space-y-4">
+                                <div class="text-5xl opacity-40">🕵️‍♂️</div>
+                                <div class="text-gray-400 text-sm font-medium">Intelligence awaiting orders.</div>
+                                <button onclick="loadMarkets('')"
+                                    class="mt-2 bg-polysint text-gray-900 font-bold px-5 py-2 rounded-lg text-sm hover:bg-emerald-400 transition-all">
+                                    Load Top Markets
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Watchlist Section -->
+        <div class="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+            <div class="bg-gray-700/50 px-4 py-3 border-b border-gray-700">
+                <h2 class="text-lg font-semibold">🎯 Watchlist</h2>
+            </div>
+            <div class="p-4 border-b border-gray-700 bg-gray-800/50">
+                <div class="flex gap-2 flex-wrap">
+                    <input type="text" id="newAddress" placeholder="0x proxy address"
+                        class="flex-1 min-w-48 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-xs font-mono focus:outline-none focus:border-polysint">
+                    <input type="text" id="newLabel" placeholder="Label (e.g., Whale #1)"
+                        class="flex-1 min-w-32 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-xs focus:outline-none focus:border-polysint">
+                    <button onclick="addTarget()"
+                        class="bg-polysint text-gray-900 font-bold px-4 py-2 rounded text-xs hover:bg-emerald-400 transition-all">
+                        + Add Target
+                    </button>
+                </div>
+                <div id="addError" class="text-red-400 text-xs mt-2 hidden"></div>
+            </div>
+            <table class="w-full">
+                <tbody id="watchlistTable">
+                    <tr><td class="text-center py-10 text-gray-600 text-sm italic px-4">
+                        Watchlist empty.<br>
+                        <span class="text-xs">Add a target's 0x proxy address above.</span>
+                    </td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- AI Modal -->
+    <div id="aiModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden z-50 flex items-center justify-center p-4">
+        <div class="bg-gray-800 rounded-lg border border-gray-700 max-w-2xl w-full max-h-[80vh] overflow-auto">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700">
+                <h3 id="aiModalTitle" class="text-lg font-semibold">🤖 Analysis</h3>
+                <button onclick="closeModal()" class="text-gray-500 hover:text-white text-xl">&times;</button>
+            </div>
+            <div id="aiModalContent" class="p-4"></div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

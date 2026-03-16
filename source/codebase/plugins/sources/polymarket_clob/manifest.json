@@ -1,0 +1,36 @@
+{
+    "name": "polymarket_clob",
+    "version": "1.0.0",
+    "description": "Polymarket CLOB API data source for price history and market data",
+    "author": "PolySINT Team",
+    "module": "../polymarket_clob.py",
+    "class": "PolymarketCLOBPlugin",
+    "factory": "create_plugin",
+    "tags": ["polymarket", "clob", "prices", "market-data"],
+    "priority": 10,
+    "config_schema": {
+        "type": "object",
+        "properties": {
+            "base_url": {
+                "type": "string",
+                "default": "https://clob.polymarket.com"
+            },
+            "timeout": {
+                "type": "integer",
+                "default": 10
+            },
+            "verify_ssl": {
+                "type": "boolean",
+                "default": false
+            },
+            "default_interval": {
+                "type": "string",
+                "default": "1d"
+            },
+            "default_fidelity": {
+                "type": "integer",
+                "default": 60
+            }
+        }
+    }
+}

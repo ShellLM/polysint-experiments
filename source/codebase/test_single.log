@@ -1,0 +1,202 @@
+[RUNNING] 001: Audit api.py for missing authentication on sensitive endpoints (watchlist CRUD, profiling).
+[RUNNING] 002: Check for potential SQL injection vulnerabilities in db.py and api.py queries.
+[RUNNING] 003: Assess risk of LLM prompt injection in analyst.py market question handling.
+[RUNNING] 004: Check harvest.py for SSRF vulnerabilities when fetching external market data.
+[RUNNING] 005: Audit notifier.py for sensitive credential leakage in error logs or responses.
+[DONE] 002
+[DONE] 004
+[DONE] 005
+[DONE] 003
+[DONE] 001
+[RUNNING] 006: Evaluate use of subprocess.Popen in start.py for potential command injection.
+[RUNNING] 007: Inspect static/app.js for XSS vulnerabilities when rendering market data.
+[RUNNING] 008: Check for insecure direct object references (IDOR) in market analysis endpoints.
+[RUNNING] 009: Audit clob.py for potential SSRF via attacker-controlled token IDs.
+[RUNNING] 010: Review file permissions and secret handling in logger.py and config.py.
+[DONE] 010
+[DONE] 008
+[DONE] 006
+[DONE] 009
+[DONE] 007
+[RUNNING] 011: Optimize market enrichment in api.py to use bulk CLOB history fetching if possible.
+[RUNNING] 012: Analyze SQL query performance in db.py and suggest index optimizations.
+[RUNNING] 013: Optimize the harvester loop in harvest.py to handle rate limits more efficiently.
+[RUNNING] 014: Suggest improvements for memory management in watcher.py for large sets of seen trades.
+[RUNNING] 015: Evaluate async/await patterns in api.py to improve concurrent request throughput.
+[DONE] 014
+[DONE] 011
+[DONE] 013
+[DONE] 012
+[DONE] 015
+[RUNNING] 016: Optimize frontend bundle size and asset loading in static/index.html.
+[RUNNING] 017: Analyze analyst.py price behaviour derivation for potential speedups.
+[RUNNING] 018: Reduce latency in market search by pre-filtering volume before database calls.
+[RUNNING] 019: Optimize the heartbeat check in start.py to consume fewer resources.
+[RUNNING] 020: Improve clob.py history sorting and parsing for efficiency.
+[DONE] 019
+[DONE] 017
+[DONE] 016
+[DONE] 018
+[DONE] 020
+[RUNNING] 021: Add robust retry logic with exponential backoff to clob.py history fetching.
+[RUNNING] 022: Implement circuit breakers for external API calls in researcher.py.
+[RUNNING] 023: Improve error reporting in notifier.py when webhooks fail.
+[RUNNING] 024: Add transaction safety and rollbacks to db.py write operations.
+[RUNNING] 025: Handle potential JSON decode errors gracefully in harvest.py and analyst.py.
+[DONE] 022
+[DONE] 024
+[DONE] 021
+[DONE] 025
+[DONE] 023
+[RUNNING] 026: Improve network glitch handling in harvest.py pagination loop.
+[RUNNING] 027: Add type checking and validation for all inputs in api.py utility functions.
+[RUNNING] 028: Ensure all background processes in start.py log crashes before exiting.
+[RUNNING] 029: Improve feedback to frontend in static/app.js when backend errors occur.
+[RUNNING] 030: Handle malformed outcomePrices shapes more robustly in harvest.py.
+[DONE] 026
+[DONE] 027
+[DONE] 028
+[DONE] 029
+[DONE] 030
+[RUNNING] 031: Add comprehensive type hints to analyst.py for better maintainability.
+[RUNNING] 032: Refactor extract_first_price in harvest.py for better readability and simplicity.
+[RUNNING] 033: Implement a cleaner configuration management pattern in config.py.
+[RUNNING] 034: Standardize logging levels and formats across all PolySINT modules.
+[RUNNING] 035: Apply DRY principles to market data parsing in api.py and harvest.py.
+[DONE] 032
+[DONE] 034
+[DONE] 031
+[DONE] 033
+[DONE] 035
+[RUNNING] 036: Organize api.py into smaller, more focused sub-modules.
+[RUNNING] 037: Improve documentation and docstrings for all core logic functions.
+[RUNNING] 038: Standardize naming conventions (snake_case vs camelCase) across JS and Python.
+[RUNNING] 039: Refactor watcher.py to use a more structured event-driven pattern.
+[RUNNING] 040: Improve modularity of the frontend JS to avoid monolithic code in app.js.
+[DONE] 040
+[DONE] 036
+[DONE] 039
+[DONE] 038
+[DONE] 037
+[RUNNING] 041: Create a suite of unit tests for market shift calculations in analyst.py.
+[RUNNING] 042: Implement integration tests for the FastAPI endpoints in api.py.
+[RUNNING] 043: Design mock objects for Polymarket API calls to test harvest.py offline.
+[RUNNING] 044: Create stress tests for the database connection pool in db.py.
+[RUNNING] 045: Add frontend testing scripts for index.html using a tool like Playwright or Cypress.
+[DONE] 045
+[DONE] 042
+[DONE] 043
+[DONE] 041
+[DONE] 044
+[RUNNING] 046: Implement property-based testing for market question normalization.
+[RUNNING] 047: Create a test harness for security audit simulations on api.py.
+[RUNNING] 048: Add regression tests for the clob_token_id migration in db.py.
+[RUNNING] 049: Design a pipeline for automated UI testing of the dashboard.
+[RUNNING] 050: Create tests for the wallet unmasking logic in utils.py.
+[DONE] 050
+[DONE] 048
+[DONE] 046
+[DONE] 047
+[DONE] 049
+[RUNNING] 051: Implement cursor-based pagination for the /markets endpoint in api.py.
+[RUNNING] 052: Add versioning (e.g., /v1/) to all PolySINT API routes.
+[RUNNING] 053: Standardize JSON response formats for success and error cases.
+[RUNNING] 054: Add rate limiting headers and enforcement to all public endpoints.
+[RUNNING] 055: Expose more granular volume filter options in the /markets search API.
+[DONE] 052
+[DONE] 054
+[DONE] 051
+[DONE] 055
+[DONE] 053
+[RUNNING] 056: Create a dedicated health-check endpoint for monitoring tools.
+[RUNNING] 057: Add Swagger/OpenAPI documentation decorators to all FastAPI routes.
+[RUNNING] 058: Implement a bulk watchlist addition endpoint in api.py.
+[RUNNING] 059: Add support for CORS configuration in the API server.
+[RUNNING] 060: Improve the search query validation to prevent oversized inputs.
+[DONE] 058
+[DONE] 059
+[DONE] 056
+[DONE] 060
+[DONE] 057
+[RUNNING] 061: Add a responsive mobile-friendly layout to static/index.html.
+[RUNNING] 062: Improve data visualization for market shifts using Sparklines or charts.
+[RUNNING] 063: Add a dark mode / light mode toggle to the CSS design system.
+[RUNNING] 064: Implement better loading indicators and skeleton screens in app.js.
+[RUNNING] 065: Add accessibility (Aria) attributes to all interactive dashboard elements.
+[DONE] 063
+[DONE] 065
+[DONE] 064
+[DONE] 061
+[DONE] 062
+[RUNNING] 066: Improve the layout of the wallet profiling results for better readability.
+[RUNNING] 067: Add a real-time status indicator for the harvester and anomaly scanner.
+[RUNNING] 068: Enhance the search bar with auto-suggestions or recent searches.
+[RUNNING] 069: Improve error messaging UI with toast notifications.
+[RUNNING] 070: Add a 'Copy to Clipboard' feature for wallet addresses and market IDs.
+[DONE] 068
+[DONE] 066
+[DONE] 069
+[DONE] 067
+[DONE] 070
+[RUNNING] 071: Implement Prometheus-style metrics for API latency and request counts.
+[RUNNING] 072: Add structured JSON logging across the entire PolySINT stack.
+[RUNNING] 073: Create a script for automated daily intelligence summaries based on logs.
+[RUNNING] 074: Enhance start.py heartbeat to include disk space and memory usage metrics.
+[RUNNING] 075: Implement Slack/Discord notifications for critical system crashes.
+[DONE] 074
+[DONE] 071
+[DONE] 075
+[DONE] 073
+[DONE] 072
+[RUNNING] 076: Add tracing (e.g., OpenTelemetry) to track requests across the stack.
+[RUNNING] 077: Create a dashboard for monitoring harvester lag and sync status.
+[RUNNING] 078: Implement log rotation and archiving to prevent disk space issues.
+[RUNNING] 079: Add alerts for unusually high API latency or error rates.
+[RUNNING] 080: Improve the system heartbeat to report on database health/connectivity.
+[DONE] 078
+[DONE] 080
+[DONE] 076
+[DONE] 079
+[DONE] 077
+[RUNNING] 081: Migrate the harvester to a task queue (e.g., RQ or Celery) for better scaling.
+[RUNNING] 082: Containerize the PolySINT engine using Docker and Docker Compose.
+[RUNNING] 083: Implement a caching layer (e.g., Redis) for frequently accessed market data.
+[RUNNING] 084: Refactor for dependency injection to make components more testable.
+[RUNNING] 085: Decouple the frontend from the backend using a proper build step (Vite/Next).
+[DONE] 083
+[DONE] 084
+[DONE] 085
+[DONE] 081
+[DONE] 082
+[RUNNING] 086: Move long-running AI analysis to a background worker process.
+[RUNNING] 087: Implement a more robust database migration strategy (e.g. Alembic).
+[RUNNING] 088: Refactor start.py to use a systemd service file or supervisor.
+[RUNNING] 089: Design a microservices bridge for multi-chain support beyond Polygon.
+[RUNNING] 090: Implement a plugin architecture for adding new data sources.
+[DONE] 087
+[DONE] 088
+[DONE] 090
+[DONE] 086
+[DONE] 089
+[RUNNING] 091: Add support for tracking multiple outcomes per market in alerts.py.
+[RUNNING] 092: Implement a basic 'Insider Score' leaderboard in the frontend.
+[RUNNING] 093: Add a feature to export watchlist data to CSV or PDF.
+[RUNNING] 094: Integrate additional news sources (e.g. RSS feeds) into researcher.py.
+[RUNNING] 095: Implement a simple notification preference system for users.
+[DONE] 094
+[DONE] 091
+[DONE] 095
+[DONE] 092
+[DONE] 093
+[RUNNING] 096: Add historical trend line charts to the market analysis profile.
+[RUNNING] 097: Create an automated 'Alpha' discovery mode based on whale trade clusters.
+[RUNNING] 098: Implement support for multi-currency volume tracking (USD/USDC).
+[RUNNING] 099: Add a social sharing feature for interesting market anomalies.
+[RUNNING] 100: Integrate a basic feedback loop where users can rate AI analysis accuracy.
+[DONE] 099
+[DONE] 098
+[DONE] 096
+[DONE] 097
+[DONE] 100
+---
+100 Experiments Completed.

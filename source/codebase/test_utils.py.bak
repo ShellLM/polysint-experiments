@@ -1,0 +1,303 @@
+"""
+Tests for wallet unmasking logic in utils.py
+
+Covers:
+- Valid proxy contracts returning owner addresses
+- Direct wallets (EOAs) that aren't contracts
+- Empty/invalid responses
+- Exception handling for network/RPC failures
+- Address validation edge cases
+"""
+
+import pytest
+from unittest.mock import Mock, patch, MagicMock
+from utils import unmask_proxy
+
+
+# ─── Test Fixtures ─────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def mock_w3():
+    """Mock the global w3 Web3 instance."""
+    with patch('utils.w3') as mock:
+        yield mock
+
+
+@pytest.fixture
+def valid_proxy_address():
+    """A valid Ethereum address for testing."""
+    return "0x1234567890abcdef1234567890abcdef12345678"
+
+
+@pytest.fixture
+def expected_owner_address():
+    """Expected owner address returned from a proxy contract."""
+    return "0xABCDEF1234567890ABCDEF1234567890ABCDEF12"
+
+
+# ─── Happy Path: Valid Proxy Contract ──────────────────────────────────────────
+
+class TestValidProxyContract:
+    """Tests when the address is a valid proxy contract with an owner."""
+
+    def test_returns_owner_address_from_getowners(self, mock_w3, valid_proxy_address, expected_owner_address):
+        """Should extract and return the owner address from the contract response."""
+        # getOwners() returns 32 bytes, last 20 are the address
+        # Pad the expected owner with leading zeros to 32 bytes
+        padded_owner = "0x000000000000000000000000" + expected_owner_address[2:]
+        mock_response = bytes.fromhex(padded_owner[2:])
+        
+        mock_w3.eth.call.return_value = mock_response
+        mock_w3.to_checksum_address.return_value = expected_owner_address
+        
+        result = unmask_proxy(valid_proxy_address)
+        
+        # Verify the call was made correctly
+        mock_w3.eth.call.assert_called_once()
+        call_args = mock_w3.eth.call.call_args[0][0]
+        assert call_args['data'] == '0x7065c0d4'  # getOwners() signature
+        
+        # Should return the owner address, not the fallback string
+        assert result == expected_owner_address
+        mock_w3.to_checksum_address.assert_called_once_with(expected_owner_address)
+
+    def test_handles_lowercase_owner_in_response(self, mock_w3, valid_proxy_address):
+        """Should handle lowercase addresses in the contract response."""
+        owner_lower = "0xabcdef1234567890abcdef1234567890abcdef12"
+        owner_checksum = "0xABCDEF1234567890ABCDEF1234567890ABCDEF12"
+        
+        padded_owner = "0x000000000000000000000000" + owner_lower[2:]
+        mock_response = bytes.fromhex(padded_owner[2:])
+        
+        mock_w3.eth.call.return_value = mock_response
+        mock_w3.to_checksum_address.return_value = owner_checksum
+        
+        result = unmask_proxy(valid_proxy_address)
+        
+        assert result == owner_checksum
+
+    def test_calls_with_checksum_address(self, mock_w3, valid_proxy_address):
+        """Should convert input address to checksum format before calling."""
+        lowercase_address = "0x1234567890abcdef1234567890abcdef12345678"
+        checksummed = "0x1234567890AbCdEf1234567890aBcDeF12345678"
+        
+        padded_owner = "0x000000000000000000000000abcdef1234567890abcdef1234567890abcdef12"
+        mock_response = bytes.fromhex(padded_owner[4:])
+        
+        mock_w3.eth.call.return_value = mock_response
+        mock_w3.to_checksum_address.side_effect = lambda x: checksummed if x == lowercase_address else x
+        
+        unmask_proxy(lowercase_address)
+        
+        # to_checksum_address called for both the proxy address and the owner
+        assert mock_w3.to_checksum_address.call_count >= 1
+
+
+# ─── Direct Wallet (EOA) Cases ─────────────────────────────────────────────────
+
+class TestDirectWallet:
+    """Tests when the address is an EOA (externally owned account), not a contract."""
+
+    def test_returns_direct_wallet_for_empty_response(self, mock_w3, valid_proxy_address):
+        """Should return 'Direct Wallet' when the contract call returns empty."""
+        mock_w3.eth.call.return_value = b''
+        
+        result = unmask_proxy(valid_proxy_address)
+        
+        assert result == "Direct Wallet (Not a Proxy)"
+
+    def test_returns_direct_wallet_for_none_response(self, mock_w3, valid_proxy_address):
+        """Should handle None response gracefully."""
+        mock_w3.eth.call.return_value = None
+        
+        result = unmask_proxy(valid_proxy_address)
+        
+        assert result == "Direct Wallet (Not a Proxy)"
+
+    def test_returns_direct_wallet_for_falsy_response(self, mock_w3, valid_proxy_address):
+        """Should handle any falsy response as a direct wallet."""
+        mock_w3.eth.call.return_value = bytes()  # Empty bytes, falsy
+        
+        result = unmask_proxy(valid_proxy_address)
+        
+        assert result == "Direct Wallet (Not a Proxy)"
+
+
+# ─── Exception Handling ───────────────────────────────────────────────────────
+
+class TestExceptionHandling:
+    """Tests for various exceptions during the eth_call."""
+
+    def test_handles_contract_revert(self, mock_w3, valid_proxy_address):
+        """Should return 'Direct Wallet' when the contract reverts (EOA behavior)."""
+        from web3.exceptions import ContractLogicError
+        
+        mock_w3.eth.call.side_effect = ContractLogicError("execution reverted")
+        
+        result = unmask_proxy(valid_proxy_address)
+        
+        assert result == "Direct Wallet (Not a Proxy)"
+
+    def test_handles_network_error(self, mock_w3, valid_proxy_address):
+        """Should handle network/connection errors gracefully."""
+        from requests.exceptions import ConnectionError
+        
+        mock_w3.eth.call.side_effect = ConnectionError("RPC endpoint unreachable")
+        
+        result = unmask_proxy(valid_proxy_address)
+        
+        assert result == "Direct Wallet (Not a Proxy)"
+
+    def test_handles_timeout_error(self, mock_w3, valid_proxy_address):
+        """Should handle timeout errors gracefully."""
+        from requests.exceptions import Timeout
+        
+        mock_w3.eth.call.side_effect = Timeout("RPC call timed out")
+        
+        result = unmask_proxy(valid_proxy_address)
+        
+        assert result == "Direct Wallet (Not a Proxy)"
+
+    def test_handles_value_error(self, mock_w3, valid_proxy_address):
+        """Should handle ValueError (e.g., invalid address format)."""
+        mock_w3.eth.call.side_effect = ValueError("Invalid address format")
+        
+        result = unmask_proxy(valid_proxy_address)
+        
+        assert result == "Direct Wallet (Not a Proxy)"
+
+    def test_handles_generic_exception(self, mock_w3, valid_proxy_address):
+        """Should catch-all any unexpected exceptions."""
+        mock_w3.eth.call.side_effect = RuntimeError("Unexpected error")
+        
+        result = unmask_proxy(valid_proxy_address)
+        
+        assert result == "Direct Wallet (Not a Proxy)"
+
+    def test_logs_exception_info(self, mock_w3, valid_proxy_address):
+        """Should log the exception for debugging."""
+        mock_w3.eth.call.side_effect = Exception("test error")
+        
+        with patch('utils.log') as mock_log:
+            result = unmask_proxy(valid_proxy_address)
+            
+            mock_log.info.assert_called_once()
+            call_args = mock_log.info.call_args[0][0]
+            assert valid_proxy_address in call_args
+            assert "EOA" in call_args
+
+
+# ─── Edge Cases ───────────────────────────────────────────────────────────────
+
+class TestEdgeCases:
+    """Tests for boundary conditions and edge cases."""
+
+    def test_handles_short_response_bytes(self, mock_w3, valid_proxy_address):
+        """Should handle malformed short responses without crashing."""
+        # Response with fewer than 20 bytes
+        mock_w3.eth.call.return_value = bytes.fromhex("123456")
+        
+        # This will try to extract last 40 hex chars from a short response
+        # The hex() will be short, so [-40:] will still work but give padding
+        result = unmask_proxy(valid_proxy_address)
+        
+        # It might still return an address or fall through
+        # The key is it shouldn't raise an exception
+        assert result is not None
+
+    def test_handles_all_zero_owner(self, mock_w3, valid_proxy_address):
+        """Should handle the zero address as an owner (edge case)."""
+        zero_address = "0x0000000000000000000000000000000000000000"
+        
+        # Response is already 32 bytes of zeros, last 20 are the zero address
+        mock_response = bytes(32)
+        
+        mock_w3.eth.call.return_value = mock_response
+        mock_w3.to_checksum_address.return_value = zero_address
+        
+        result = unmask_proxy(valid_proxy_address)
+        
+        # Should return the zero address (valid but unusual)
+        assert result == zero_address
+
+    def test_checksum_conversion_failure(self, mock_w3, valid_proxy_address):
+        """Should handle checksum conversion failures."""
+        mock_response = bytes(32)  # Valid response
+        
+        mock_w3.eth.call.return_value = mock_response
+        mock_w3.to_checksum_address.side_effect = ValueError("Invalid hex")
+        
+        result = unmask_proxy(valid_proxy_address)
+        
+        # Should fall through to direct wallet on exception
+        assert result == "Direct Wallet (Not a Proxy)"
+
+
+# ─── Integration-style Tests ───────────────────────────────────────────────────
+
+class TestGetOwnersSignature:
+    """Tests verifying the getOwners() function signature is called correctly."""
+
+    def test_uses_correct_function_signature(self, mock_w3, valid_proxy_address):
+        """Should call with the correct getOwners() selector."""
+        mock_w3.eth.call.return_value = bytes(32)
+        
+        unmask_proxy(valid_proxy_address)
+        
+        call_args = mock_w3.eth.call.call_args[0][0]
+        # getOwners() selector is keccak256("getOwners()")[:4] = 0x7065c0d4
+        assert call_args['data'] == '0x7065c0d4'
+
+    def test_includes_to_address_in_call(self, mock_w3, valid_proxy_address):
+        """Should include the target address in the eth_call."""
+        checksummed = "0x1234567890ABCDEF1234567890ABCDEF12345678"
+        mock_w3.to_checksum_address.return_value = checksummed
+        mock_w3.eth.call.return_value = bytes(32)
+        
+        unmask_proxy(valid_proxy_address)
+        
+        call_args = mock_w3.eth.call.call_args[0][0]
+        assert 'to' in call_args
+
+
+# ─── Parametrized Tests ────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("response_value,expected_result", [
+    (b'', "Direct Wallet (Not a Proxy)"),
+    (None, "Direct Wallet (Not a Proxy)"),
+    (bytes(), "Direct Wallet (Not a Proxy)"),
+    (bytes(32), "0x0000000000000000000000000000000000000000"),  # Zero address
+])
+def test_various_response_values(mock_w3, valid_proxy_address, response_value, expected_result):
+    """Parametrized test for various response values."""
+    mock_w3.eth.call.return_value = response_value
+    
+    if response_value and len(response_value) == 32:
+        # For non-empty 32-byte responses, mock the checksum conversion
+        mock_w3.to_checksum_address.return_value = expected_result
+    
+    result = unmask_proxy(valid_proxy_address)
+    
+    assert result == expected_result
+
+
+@pytest.mark.parametrize("exception_type", [
+    ConnectionError,
+    TimeoutError,
+    ValueError,
+    RuntimeError,
+    Exception,
+])
+def test_various_exception_types(mock_w3, valid_proxy_address, exception_type):
+    """Parametrized test for various exception types."""
+    mock_w3.eth.call.side_effect = exception_type("test")
+    
+    result = unmask_proxy(valid_proxy_address)
+    
+    assert result == "Direct Wallet (Not a Proxy)"
+
+
+# ─── Run Tests ─────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])

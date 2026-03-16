@@ -1,0 +1,35 @@
+{
+    "name": "tavily_research",
+    "version": "1.0.0",
+    "description": "Tavily web research API for market news and context",
+    "author": "PolySINT Team",
+    "module": "../tavily_research.py",
+    "class": "TavilyResearchPlugin",
+    "factory": "create_plugin",
+    "tags": ["research", "web", "news", "tavily"],
+    "priority": 50,
+    "optional": true,
+    "config_schema": {
+        "type": "object",
+        "properties": {
+            "api_key": {
+                "type": "string",
+                "description": "Tavily API key (or set TAVILY_API_KEY env var)"
+            },
+            "search_depth": {
+                "type": "string",
+                "default": "basic",
+                "enum": ["ultra-fast", "fast", "basic", "advanced"]
+            },
+            "max_results": {
+                "type": "integer",
+                "default": 5
+            },
+            "include_domains": {
+                "type": "array",
+                "default": ["reuters.com", "apnews.com", "bloomberg.com", "twitter.com"]
+            }
+        },
+        "required": []
+    }
+}
