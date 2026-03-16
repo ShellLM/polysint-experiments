@@ -5,16 +5,16 @@ This index provides a map to all 100 experiments carried out to improve the Poly
 ## 📁 API Design
 | ID | Experiment Goal | Model/Tool | File |
 |----|-----------------|------------|------|
-| 051 | To implement efficient cursor-based pagination for the `/markets` endpoint, we need to move the sort | `test-semantic-group` | [EXP_051_API Design_test-semantic-group.md](results/EXP_051_API Design_test-semantic-group.md) |
-| 052 | I'll implement API versioning for PolySINT with a clean, maintainable structure that supports backwa | `test-semantic-group` | [EXP_052_API Design_test-semantic-group.md](results/EXP_052_API Design_test-semantic-group.md) |
-| 053 | Here's the standardized JSON response implementation for PolySINT API: | `test-semantic-group` | [EXP_053_API Design_test-semantic-group.md](results/EXP_053_API Design_test-semantic-group.md) |
-| 054 | I'll implement comprehensive rate limiting for the PolySINT API using `slowapi` with proper headers  | `test-semantic-group` | [EXP_054_API Design_test-semantic-group.md](results/EXP_054_API Design_test-semantic-group.md) |
-| 055 | Here's the enhanced implementation with granular volume filtering for the `/markets` API: | `test-semantic-group` | [EXP_055_API Design_test-semantic-group.md](results/EXP_055_API Design_test-semantic-group.md) |
-| 056 | I'll create a comprehensive health-check system for monitoring PolySINT services. This implementatio | `test-semantic-group` | [EXP_056_API Design_test-semantic-group.md](results/EXP_056_API Design_test-semantic-group.md) |
-| 057 | ```python | `test-semantic-group` | [EXP_057_API Design_test-semantic-group.md](results/EXP_057_API Design_test-semantic-group.md) |
-| 058 | I'll implement a comprehensive bulk watchlist addition endpoint that provides detailed per-item stat | `test-semantic-group` | [EXP_058_API Design_test-semantic-group.md](results/EXP_058_API Design_test-semantic-group.md) |
-| 059 | Error: 'NoneType' object has no attribute 'model_dump' | `test-semantic-group` | [EXP_059_API Design_test-semantic-group.md](results/EXP_059_API Design_test-semantic-group.md) |
-| 060 | [36m[i] LLM Safety Audit...[0m [32mPASSED[0m | `test-semantic-group` | [EXP_060_API Design_test-semantic-group.md](results/EXP_060_API Design_test-semantic-group.md) |
+| 051 | To implement efficient cursor-based pagination for the `/markets` endpoint, we need to move the sort | `test-semantic-group` | [EXP_051_API Design_test-semantic-group.md](results/EXP_051_API%20Design_test-semantic-group.md) |
+| 052 | I'll implement API versioning for PolySINT with a clean, maintainable structure that supports backwa | `test-semantic-group` | [EXP_052_API Design_test-semantic-group.md](results/EXP_052_API%20Design_test-semantic-group.md) |
+| 053 | Here's the standardized JSON response implementation for PolySINT API: | `test-semantic-group` | [EXP_053_API Design_test-semantic-group.md](results/EXP_053_API%20Design_test-semantic-group.md) |
+| 054 | I'll implement comprehensive rate limiting for the PolySINT API using `slowapi` with proper headers  | `test-semantic-group` | [EXP_054_API Design_test-semantic-group.md](results/EXP_054_API%20Design_test-semantic-group.md) |
+| 055 | Here's the enhanced implementation with granular volume filtering for the `/markets` API: | `test-semantic-group` | [EXP_055_API Design_test-semantic-group.md](results/EXP_055_API%20Design_test-semantic-group.md) |
+| 056 | I'll create a comprehensive health-check system for monitoring PolySINT services. This implementatio | `test-semantic-group` | [EXP_056_API Design_test-semantic-group.md](results/EXP_056_API%20Design_test-semantic-group.md) |
+| 057 | ```python | `test-semantic-group` | [EXP_057_API Design_test-semantic-group.md](results/EXP_057_API%20Design_test-semantic-group.md) |
+| 058 | I'll implement a comprehensive bulk watchlist addition endpoint that provides detailed per-item stat | `test-semantic-group` | [EXP_058_API Design_test-semantic-group.md](results/EXP_058_API%20Design_test-semantic-group.md) |
+| 059 | Error: 'NoneType' object has no attribute 'model_dump' | `test-semantic-group` | [EXP_059_API Design_test-semantic-group.md](results/EXP_059_API%20Design_test-semantic-group.md) |
+| 060 | [36m[i] LLM Safety Audit...[0m [32mPASSED[0m | `test-semantic-group` | [EXP_060_API Design_test-semantic-group.md](results/EXP_060_API%20Design_test-semantic-group.md) |
 
 ## 📁 Architecture
 | ID | Experiment Goal | Model/Tool | File |
@@ -33,30 +33,30 @@ This index provides a map to all 100 experiments carried out to improve the Poly
 ## 📁 Code Quality
 | ID | Experiment Goal | Model/Tool | File |
 |----|-----------------|------------|------|
-| 031 | ```python | `test-semantic-group` | [EXP_031_Code Quality_test-semantic-group.md](results/EXP_031_Code Quality_test-semantic-group.md) |
-| 032 | Here's the refactored `extract_first_price` function with improved readability and simplicity: | `test-semantic-group` | [EXP_032_Code Quality_test-semantic-group.md](results/EXP_032_Code Quality_test-semantic-group.md) |
-| 033 | ```python | `test-semantic-group` | [EXP_033_Code Quality_test-semantic-group.md](results/EXP_033_Code Quality_test-semantic-group.md) |
-| 034 | I'll standardize logging across all PolySINT modules by creating a unified logging infrastructure wi | `test-semantic-group` | [EXP_034_Code Quality_test-semantic-group.md](results/EXP_034_Code Quality_test-semantic-group.md) |
-| 035 | Here's the refactored code applying DRY principles to eliminate duplicated market data parsing logic | `test-semantic-group` | [EXP_035_Code Quality_test-semantic-group.md](results/EXP_035_Code Quality_test-semantic-group.md) |
-| 036 | Here's the refactored structure for `api.py` into smaller, focused sub-modules. This maintains the e | `test-semantic-group` | [EXP_036_Code Quality_test-semantic-group.md](results/EXP_036_Code Quality_test-semantic-group.md) |
-| 037 | Here is the synthesized improvement to documentation and docstrings for all core logic functions, co | `test-semantic-group` | [EXP_037_Code Quality_test-semantic-group.md](results/EXP_037_Code Quality_test-semantic-group.md) |
-| 038 | Here's the standardized implementation for naming conventions across JS and Python: | `test-semantic-group` | [EXP_038_Code Quality_test-semantic-group.md](results/EXP_038_Code Quality_test-semantic-group.md) |
-| 039 | ```python | `test-semantic-group` | [EXP_039_Code Quality_test-semantic-group.md](results/EXP_039_Code Quality_test-semantic-group.md) |
-| 040 | [36m[i] LLM Safety Audit...[0m [31mREJECTED[0m | `test-semantic-group` | [EXP_040_Code Quality_test-semantic-group.md](results/EXP_040_Code Quality_test-semantic-group.md) |
+| 031 | ```python | `test-semantic-group` | [EXP_031_Code Quality_test-semantic-group.md](results/EXP_031_Code%20Quality_test-semantic-group.md) |
+| 032 | Here's the refactored `extract_first_price` function with improved readability and simplicity: | `test-semantic-group` | [EXP_032_Code Quality_test-semantic-group.md](results/EXP_032_Code%20Quality_test-semantic-group.md) |
+| 033 | ```python | `test-semantic-group` | [EXP_033_Code Quality_test-semantic-group.md](results/EXP_033_Code%20Quality_test-semantic-group.md) |
+| 034 | I'll standardize logging across all PolySINT modules by creating a unified logging infrastructure wi | `test-semantic-group` | [EXP_034_Code Quality_test-semantic-group.md](results/EXP_034_Code%20Quality_test-semantic-group.md) |
+| 035 | Here's the refactored code applying DRY principles to eliminate duplicated market data parsing logic | `test-semantic-group` | [EXP_035_Code Quality_test-semantic-group.md](results/EXP_035_Code%20Quality_test-semantic-group.md) |
+| 036 | Here's the refactored structure for `api.py` into smaller, focused sub-modules. This maintains the e | `test-semantic-group` | [EXP_036_Code Quality_test-semantic-group.md](results/EXP_036_Code%20Quality_test-semantic-group.md) |
+| 037 | Here is the synthesized improvement to documentation and docstrings for all core logic functions, co | `test-semantic-group` | [EXP_037_Code Quality_test-semantic-group.md](results/EXP_037_Code%20Quality_test-semantic-group.md) |
+| 038 | Here's the standardized implementation for naming conventions across JS and Python: | `test-semantic-group` | [EXP_038_Code Quality_test-semantic-group.md](results/EXP_038_Code%20Quality_test-semantic-group.md) |
+| 039 | ```python | `test-semantic-group` | [EXP_039_Code Quality_test-semantic-group.md](results/EXP_039_Code%20Quality_test-semantic-group.md) |
+| 040 | [36m[i] LLM Safety Audit...[0m [31mREJECTED[0m | `test-semantic-group` | [EXP_040_Code Quality_test-semantic-group.md](results/EXP_040_Code%20Quality_test-semantic-group.md) |
 
 ## 📁 Error Handling
 | ID | Experiment Goal | Model/Tool | File |
 |----|-----------------|------------|------|
-| 021 | Updated `clob.py` with Retry Logic | `glm-5-chutes` | [EXP_021_Error Handling_glm-5-chutes.md](results/EXP_021_Error Handling_glm-5-chutes.md) |
-| 022 | Here is the updated `researcher.py` with a thread-safe Circuit Breaker pattern implemented. This pre | `glm-5-chutes` | [EXP_022_Error Handling_glm-5-chutes.md](results/EXP_022_Error Handling_glm-5-chutes.md) |
-| 023 | FILE: notifier.py ### | `glm-5-chutes` | [EXP_023_Error Handling_glm-5-chutes.md](results/EXP_023_Error Handling_glm-5-chutes.md) |
-| 024 | FILE: db.py ### | `glm-5-chutes` | [EXP_024_Error Handling_glm-5-chutes.md](results/EXP_024_Error Handling_glm-5-chutes.md) |
-| 025 | REASONING SUMMARY | `glm-5-chutes` | [EXP_025_Error Handling_glm-5-chutes.md](results/EXP_025_Error Handling_glm-5-chutes.md) |
-| 026 | Analysis of Changes | `glm-5-chutes` | [EXP_026_Error Handling_glm-5-chutes.md](results/EXP_026_Error Handling_glm-5-chutes.md) |
-| 027 | `utils.py` | `glm-5-chutes` | [EXP_027_Error Handling_glm-5-chutes.md](results/EXP_027_Error Handling_glm-5-chutes.md) |
-| 028 | Here is the updated `start.py` file. It now redirects `stderr` from all child processes to `analyzer | `glm-5-chutes` | [EXP_028_Error Handling_glm-5-chutes.md](results/EXP_028_Error Handling_glm-5-chutes.md) |
-| 029 | FILE: static/app.js ### | `glm-5-chutes` | [EXP_029_Error Handling_glm-5-chutes.md](results/EXP_029_Error Handling_glm-5-chutes.md) |
-| 030 | [36m[i] LLM Safety Audit...[0m [32mPASSED[0m | `glm-5-chutes` | [EXP_030_Error Handling_glm-5-chutes.md](results/EXP_030_Error Handling_glm-5-chutes.md) |
+| 021 | Updated `clob.py` with Retry Logic | `glm-5-chutes` | [EXP_021_Error Handling_glm-5-chutes.md](results/EXP_021_Error%20Handling_glm-5-chutes.md) |
+| 022 | Here is the updated `researcher.py` with a thread-safe Circuit Breaker pattern implemented. This pre | `glm-5-chutes` | [EXP_022_Error Handling_glm-5-chutes.md](results/EXP_022_Error%20Handling_glm-5-chutes.md) |
+| 023 | FILE: notifier.py ### | `glm-5-chutes` | [EXP_023_Error Handling_glm-5-chutes.md](results/EXP_023_Error%20Handling_glm-5-chutes.md) |
+| 024 | FILE: db.py ### | `glm-5-chutes` | [EXP_024_Error Handling_glm-5-chutes.md](results/EXP_024_Error%20Handling_glm-5-chutes.md) |
+| 025 | REASONING SUMMARY | `glm-5-chutes` | [EXP_025_Error Handling_glm-5-chutes.md](results/EXP_025_Error%20Handling_glm-5-chutes.md) |
+| 026 | Analysis of Changes | `glm-5-chutes` | [EXP_026_Error Handling_glm-5-chutes.md](results/EXP_026_Error%20Handling_glm-5-chutes.md) |
+| 027 | `utils.py` | `glm-5-chutes` | [EXP_027_Error Handling_glm-5-chutes.md](results/EXP_027_Error%20Handling_glm-5-chutes.md) |
+| 028 | Here is the updated `start.py` file. It now redirects `stderr` from all child processes to `analyzer | `glm-5-chutes` | [EXP_028_Error Handling_glm-5-chutes.md](results/EXP_028_Error%20Handling_glm-5-chutes.md) |
+| 029 | FILE: static/app.js ### | `glm-5-chutes` | [EXP_029_Error Handling_glm-5-chutes.md](results/EXP_029_Error%20Handling_glm-5-chutes.md) |
+| 030 | [36m[i] LLM Safety Audit...[0m [32mPASSED[0m | `glm-5-chutes` | [EXP_030_Error Handling_glm-5-chutes.md](results/EXP_030_Error%20Handling_glm-5-chutes.md) |
 
 ## 📁 Features
 | ID | Experiment Goal | Model/Tool | File |
