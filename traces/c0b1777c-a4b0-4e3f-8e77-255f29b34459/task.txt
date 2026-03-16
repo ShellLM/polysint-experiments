@@ -1,0 +1,25 @@
+Improve clob.py efficiency:
+
+TARGET FILE: clob.py
+
+ISSUES TO ADDRESS:
+1. Duplicate API calls - get_shift() and get_history_as_price_list() both call get_price_history() independently
+2. Sorting with lambda on every call - use operator.itemgetter and check if already sorted
+3. No caching - same token requested repeatedly within short windows
+4. Multiple float parsing - parse once and cache the parsed values
+
+REQUIRED IMPROVEMENTS:
+1. Add a simple in-memory cache with TTL (e.g., 60 seconds) for get_price_history results
+2. Use operator.itemgetter instead of lambda for sorting
+3. Check if data is already sorted before sorting (API may return chronological)
+4. Add a combined function that returns both shift and price_list in one call to avoid redundant fetches
+5. Pre-parse floats in the cached data structure to avoid repeated float() calls
+
+CONSTRAINTS:
+- Keep the same function signatures for backward compatibility (get_price_history, get_shift, get_history_as_price_list)
+- Add new combined function: get_price_data(clob_token_id) -> dict with 'history', 'prices', 'shift' keys
+- Use only stdlib (no external caching libraries)
+- TTL should be configurable via constant at top of file
+
+DELIVERABLE:
+Save the improved clob.py file and report what was changed.
