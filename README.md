@@ -60,7 +60,8 @@ Every 10th experiment used `agent8.sh` (autonomous bash agent with manager/subag
 polysint/
 ├── README.md                  # This file
 ├── source/
-│   └── polysint_all_source.txt   # Complete PolySINT source code (16 files)
+│   ├── polysint_all_source.txt   # Complete PolySINT source code (single bundled file)
+│   └── codebase/                 # Full unbundled project (api.py, config.py, plugins/, static/, etc.)
 ├── audit/
 │   └── initial_security_audit.md # Previous agent8 security audit output
 ├── results/
