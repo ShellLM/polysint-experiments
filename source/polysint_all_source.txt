@@ -1,0 +1,1869 @@
+=== COMBINED SOURCE FOR AUDIT ===
+
+
+### FILE: alerts.py ###
+import json
+import time
+from db import get_db
+from notifier import Notifier
+from logger import get_logger
+from clob import get_shift, get_price_history, DEFAULT_INTERVAL
+
+log = get_logger("Alerts")
+
+# ─── Thresholds ───────────────────────────────────────────────────────────────
+
+# Minimum 24h price shift to trigger an alert
+ANOMALY_THRESHOLD = 0.10  # 10%
+
+# Markets below this lifetime volume are ignored entirely —
+# low-liquidity markets move 10%+ on single small trades and generate noise
+MIN_ALERT_VOLUME = 5000
+
+# Markets with a current YES probability above this or below its inverse are
+# close to resolution. Their swings carry less signal and generate noise.
+# e.g. 0.80 means: skip markets already sitting at >80% or <20%
+NEAR_RESOLUTION_THRESHOLD = 0.80
+
+
+def safe_float(val):
+    """Returns float or None — never raises."""
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def scan_for_anomalies():
+    db = get_db()
+    markets = db.execute("SELECT id, question, volume, clob_token_id FROM markets").fetchall()
+    db.close()
+
+    notifier = Notifier()
+
+    for m in markets:
+        # ── Volume gate ──────────────────────────────────────────────────────
+        # Reject $0 and low-volume markets before any CLOB call.
+        # Volume in the DB is set at harvest time — stale or never-traded
+        # markets can still shift 10%+ on single trades and are not actionable.
+        market_volume = m['volume'] or 0
+        if market_volume < MIN_ALERT_VOLUME:
+            continue
+
+        clob_token_id = m['clob_token_id']
+
+        try:
+            if clob_token_id:
+                # ── Primary path: CLOB history ───────────────────────────────
+                shift = get_shift(clob_token_id)
+
+                if shift is None:
+                    continue
+
+                if abs(shift) >= ANOMALY_THRESHOLD:
+                    # Get current price for context and the near-resolution check
+                    history = get_price_history(clob_token_id)
+                    if not history:
+                        continue
+
+                    current_price = float(history[-1]['p'])
+
+                    # ── Near-resolution gate ──────────────────────────────────
+                    # Skip markets already close to 100% or 0% — they are
+                    # effectively settled and their remaining moves are noise.
+                    if current_price >= NEAR_RESOLUTION_THRESHOLD or current_price <= (1 - NEAR_RESOLUTION_THRESHOLD):
+                        log.warning(
+                            f"Suppressed alert for '{m['question']}': "
+                            f"price {current_price:.2f} is near resolution."
+                        )
+                        continue
+
+                    direction = "📈" if shift > 0 else "📉"
+                    current_price_str = f"{round(current_price * 100)}%"
+
+                    msg = (
+                        f"{direction} **{m['question']}**\n"
+                        f"Shifted **{shift * 100:.1f}%** over the last {DEFAULT_INTERVAL} "
+                        f"— now at **{current_price_str}**\n"
+                        f"Volume: ${market_volume:,.0f}\n\n"
+                        f"_Open the dashboard to run AI analysis on demand._"
+                    )
+                    notifier.broadcast(msg, title="🚨 Market Anomaly Detected")
+
+            else:
+                # ── Fallback: local snapshot comparison ──────────────────────
+                db2 = get_db()
+                history = db2.execute("""
+                    SELECT prices FROM snapshots
+                    WHERE market_id = ?
+                    ORDER BY timestamp DESC LIMIT 2""", (m['id'],)).fetchall()
+                db2.close()
+
+                if len(history) < 2:
+                    continue
+
+                try:
+                    prices_now = json.loads(history[0]['prices'])
+                    prices_then = json.loads(history[1]['prices'])
+                except (json.JSONDecodeError, TypeError):
+                    log.warning(f"Malformed prices JSON in snapshots for market {m['id']}, skipping.")
+                    continue
+
+                if not prices_now or not prices_then:
+                    continue
+
+                now = safe_float(prices_now[0])
+                then = safe_float(prices_then[0])
+
+                if now is None or then is None:
+                    log.warning(
+                        f"Non-numeric price in snapshots for market {m['id']} "
+                        f"(got '{prices_now[0]}' / '{prices_then[0]}'), skipping."
+                    )
+                    continue
+
+                diff = now - then
+
+                if abs(diff) >= ANOMALY_THRESHOLD:
+                    # ── Near-resolution gate (snapshot fallback) ──────────────
+                    if now >= NEAR_RESOLUTION_THRESHOLD or now <= (1 - NEAR_RESOLUTION_THRESHOLD):
+                        log.warning(
+                            f"Suppressed alert for '{m['question']}': "
+                            f"price {now:.2f} is near resolution (snapshot fallback)."
+                        )
+                        continue
+
+                    direction = "📈" if diff > 0 else "📉"
+                    msg = (
+                        f"{direction} **{m['question']}**\n"
+                        f"Shifted **{diff * 100:.1f}%** (local snapshots)\n"
+                        f"Volume: ${market_volume:,.0f}\n\n"
+                        f"_Open the dashboard to run AI analysis on demand._"
+                    )
+                    notifier.broadcast(msg, title="🚨 Market Anomaly Detected")
+
+        except Exception as e:
+            log.error(f"Error scanning anomaly for {m['id']}: {e}")
+            continue
+
+
+if __name__ == "__main__":
+    print(
+        f"Anomaly Scanner active — "
+        f"Threshold: {ANOMALY_THRESHOLD * 100:.0f}% over {DEFAULT_INTERVAL} | "
+        f"Min volume: ${MIN_ALERT_VOLUME:,} | "
+        f"Near-resolution cutoff: {NEAR_RESOLUTION_THRESHOLD * 100:.0f}%"
+    )
+    while True:
+        scan_for_anomalies()
+        time.sleep(300)  # Run every 5 minutes
+
+
+### FILE: analyst.py ###
+import os
+from datetime import datetime, timezone
+from openai import OpenAI
+from dotenv import load_dotenv
+from researcher import PolyResearcher
+from config import Config
+
+load_dotenv()
+
+
+def _derive_price_behaviour(price_history: list) -> dict:
+    """
+    Derives observable behavioural signals from a flat price list.
+    These become first-class evidence for the LLM — it should never need to
+    say "no data" about the price action itself, only about external news.
+
+    Returns a dict of computed metrics with plain-English descriptions.
+    """
+    if not price_history or len(price_history) < 2:
+        return {"summary": "Insufficient price history (fewer than 2 data points)."}
+
+    try:
+        prices = [float(p) for p in price_history]
+    except (TypeError, ValueError):
+        return {"summary": "Price data could not be parsed."}
+
+    first = prices[0]
+    last = prices[-1]
+    high = max(prices)
+    low = min(prices)
+    total_shift = last - first
+    total_range = high - low
+    n = len(prices)
+
+    # Find the single largest jump between consecutive points
+    jumps = [(prices[i+1] - prices[i], i) for i in range(n - 1)]
+    max_jump, max_jump_idx = max(jumps, key=lambda x: abs(x[0]))
+
+    # Characterise where in the window the big move happened
+    position_pct = round((max_jump_idx / max(n - 1, 1)) * 100)
+    if position_pct < 25:
+        jump_timing = "early in the window"
+    elif position_pct < 75:
+        jump_timing = "mid-window"
+    else:
+        jump_timing = "late in the window (recent)"
+
+    # Is the move holding or reversing?
+    # Compare last price to the price at peak/trough
+    if total_shift > 0:
+        reversal = round((high - last) * 100, 1)
+        holding = reversal < 3.0
+        reversal_note = f"Up {round(total_shift*100,1)}% overall; pulled back {reversal}% from peak — {'holding' if holding else 'showing reversal'}."
+    elif total_shift < 0:
+        reversal = round((last - low) * 100, 1)
+        holding = reversal < 3.0
+        reversal_note = f"Down {round(abs(total_shift)*100,1)}% overall; recovered {reversal}% from trough — {'holding' if holding else 'showing partial recovery'}."
+    else:
+        reversal_note = "No net movement over the window."
+
+    # Was the move gradual or sudden?
+    # Count how many steps account for 80% of the total absolute move
+    total_abs = sum(abs(j[0]) for j in jumps)
+    sorted_jumps = sorted(jumps, key=lambda x: abs(x[0]), reverse=True)
+    cumulative = 0
+    steps_for_80pct = 0
+    for j, _ in sorted_jumps:
+        cumulative += abs(j)
+        steps_for_80pct += 1
+        if total_abs > 0 and cumulative / total_abs >= 0.8:
+            break
+
+    if steps_for_80pct == 1:
+        move_character = "single-step spike (one candle accounts for 80%+ of the move)"
+    elif steps_for_80pct <= max(2, n // 6):
+        move_character = f"sharp move concentrated in {steps_for_80pct} steps"
+    else:
+        move_character = f"gradual grind across {steps_for_80pct}+ steps"
+
+    return {
+        "data_points": n,
+        "start_price": f"{round(first * 100, 1)}%",
+        "end_price": f"{round(last * 100, 1)}%",
+        "high": f"{round(high * 100, 1)}%",
+        "low": f"{round(low * 100, 1)}%",
+        "net_shift": f"{'+' if total_shift >= 0 else ''}{round(total_shift * 100, 1)}%",
+        "largest_single_step": f"{'+' if max_jump >= 0 else ''}{round(max_jump * 100, 1)}% ({jump_timing})",
+        "move_character": move_character,
+        "trend_status": reversal_note,
+    }
+
+
+class PolyAnalyst:
+    def __init__(self):
+        self.client = OpenAI(
+            base_url=os.getenv("LLM_API_BASE_URL"),
+            api_key=os.getenv("LLM_API_KEY")
+        )
+        self.model = os.getenv("ANALYSIS_MODEL")
+        self.researcher = PolyResearcher()
+
+    def analyze_market_shift(self, market_question, price_history, volume, use_research: bool = None):
+        """Explains WHY a market is moving, grounded first in price behaviour, then optionally in news."""
+        if use_research is None:
+            use_research = Config.ENABLE_WEB_RESEARCH
+
+        # Always derive price behaviour — this is the primary evidence source
+        behaviour = _derive_price_behaviour(price_history)
+
+        if use_research:
+            news_context = self.researcher.get_market_context(market_question)
+        else:
+            news_context = "Web research disabled. No external news context available."
+
+        current_time = datetime.now(timezone.utc).strftime("%B %d, %Y - %H:%M:%S UTC")
+
+        system_prompt = (
+            "You are a Senior OSINT & Forensic Financial Analyst specialising in prediction markets. "
+            f"CRITICAL: The current real-world date and time is {current_time}. "
+            "Your analysis must be grounded in the evidence provided. "
+            "The PRICE BEHAVIOUR section is primary evidence — it is derived directly from market data and is always available. "
+            "The NEWS CONTEXT section is supplementary — it may be empty, in which case your analysis must still be substantive and grounded in the price behaviour alone. "
+            "You must NEVER produce a finding of INSUFFICIENT DATA unless the price history itself has fewer than 2 data points. "
+            "You must NEVER claim a move is unexplained simply because news is absent — price behaviour alone can support a classification. "
+            "Do not invent events. Every factual claim must trace back to either the price behaviour metrics or a specific news item below."
+        )
+
+        prompt = f"""
+MARKET QUESTION: "{market_question}"
+TOTAL VOLUME: ${volume:,.0f}
+
+━━━ PRIMARY EVIDENCE: PRICE BEHAVIOUR ━━━
+{chr(10).join(f"  {k}: {v}" for k, v in behaviour.items())}
+
+━━━ SUPPLEMENTARY EVIDENCE: NEWS CONTEXT ━━━
+{news_context}
+
+---
+INSTRUCTIONS:
+
+Work through the following steps IN ORDER.
+
+STEP 1 - PRICE BEHAVIOUR ANALYSIS:
+Using ONLY the price behaviour metrics above, describe what the market did.
+Cover: the direction and magnitude of the move, whether it was sudden or gradual,
+where in the time window it occurred, and whether it is holding or reversing.
+This step must be completed even if news context is empty.
+
+STEP 2 - NEWS CORRELATION (if news context is available):
+List each news item that is directly relevant to this market.
+For each relevant item, note its title, source URL, and published date.
+If no news items are relevant, state: "No directly relevant news found."
+If news context was disabled, state: "Web research was not run for this query."
+
+STEP 3 - TIMING ANALYSIS:
+Based on the move character (sudden vs gradual) and any dated news items:
+- A sudden single-step spike with no news strongly suggests the information
+  existed before it became public, or a large single trader acted on private conviction.
+- A gradual grind is more consistent with slow public information diffusion.
+- If dated news is available, state whether the market moved before or after it broke.
+- If no news is available, base your timing assessment on the move character alone.
+
+STEP 4 - CLASSIFICATION:
+Classify as one of:
+- REACTIONARY: A specific dated news item directly explains the shift and
+  appeared before or concurrent with the market move.
+- SUSPICIOUS: The move is sudden, large, and preceded available news — or the
+  move character (single-step spike) is inconsistent with organic public information flow.
+- ORGANIC: The move is gradual and consistent with slow public information
+  diffusion, even without a specific news item.
+- INSUFFICIENT DATA: Use ONLY if the price history has fewer than 2 data points.
+
+STEP 5 - INTELLIGENCE BRIEF:
+Write a 2-3 sentence brief. Every factual claim must be traceable to either
+the price behaviour metrics (Step 1) or a specific news item (Step 2).
+Do not hedge by saying the move is "unexplained" — explain what the data
+shows even if the cause is uncertain.
+
+STEP 6 - INSIDER SIGNAL SCORE (1-10):
+Rate the probability of insider knowledge.
+- Base the score on the move character: sudden spikes score higher than gradual grinds.
+- Adjust up if the move preceded news; adjust down if news preceded the move.
+- A score above 6 requires specific justification from Steps 1-3.
+- Do NOT cap at 5 simply because news is absent — price behaviour is sufficient evidence.
+
+---
+OUTPUT FORMAT:
+
+PRICE ACTION:
+(Step 1 findings)
+
+EVIDENCE:
+(Step 2 findings, with source URLs if available — or explicit statement if none)
+
+TIMING:
+(Step 3 finding)
+
+TYPE: (REACTIONARY / SUSPICIOUS / ORGANIC / INSUFFICIENT DATA)
+
+ANALYSIS:
+(Step 5 brief)
+
+INSIDER SIGNAL: (1-10) — (one sentence justification referencing specific data points)
+"""
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0
+        )
+        return response.choices[0].message.content
+
+    def profile_wallet(self, wallet_address, real_owner, trades):
+        """Profiles a specific trader based on behavior and unmasked ID."""
+
+        current_time = datetime.now(timezone.utc).strftime("%B %d, %Y")
+        system_prompt = (
+            "You are a digital forensic profiler. "
+            f"The current date is {current_time}. "
+            "Base your analysis strictly on the trade data provided. "
+            "Do not invent biographical details, assume identity, or speculate beyond what the trading patterns directly support. "
+            "Where the data is insufficient to draw a conclusion, say so explicitly."
+        )
+
+        prompt = f"""
+PROXY ADDRESS: {wallet_address}
+REAL OWNER (EOA): {real_owner}
+RECENT TRADES: {trades}
+
+---
+INSTRUCTIONS:
+
+Work through the following steps IN ORDER.
+
+STEP 1 - PATTERN ANALYSIS:
+What observable patterns exist in the trade data above?
+Consider: market niches traded, trade timing, position sizes, win/loss ratio if determinable.
+If the trade list is too short or sparse to identify patterns, state this explicitly.
+
+STEP 2 - ENTITY TYPE:
+Based ONLY on the patterns from Step 1, suggest the most likely entity type from:
+(Political Staffer, Domain Expert, Quantitative Bot, Retail Speculator, Market Maker, Whale, Unknown)
+If Step 1 found insufficient data, classify as: Unknown — insufficient trade history.
+
+STEP 3 - ALPHA LEVEL (1-10):
+Rate their likely information edge.
+A score above 6 requires a specific pattern from Step 1 to justify it.
+If Step 1 found insufficient data, cap the score at 5.
+
+---
+OUTPUT FORMAT:
+
+PATTERNS:
+(Step 1 findings — or explicit statement that data is insufficient)
+
+ENTITY TYPE: (from the list above)
+
+ALPHA LEVEL: (1-10) — (one sentence justification referencing a specific pattern, or acknowledgement of data limits)
+"""
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0
+        )
+        return response.choices[0].message.content
+
+
+### FILE: api.py ###
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from db import get_db, init_db
+from analyst import PolyAnalyst
+from utils import unmask_proxy
+from logger import get_logger
+from clob import get_shift, get_price_history, get_history_as_price_list, DEFAULT_INTERVAL
+from pydantic import BaseModel, field_validator
+import re
+import requests
+import json
+
+log = get_logger("API")
+
+app = FastAPI(title="PolySINT Core Engine")
+analyst = PolyAnalyst()
+
+# Pre-filter: only consider markets above this volume before hitting CLOB.
+MIN_VOLUME_FOR_CLOB = 5000
+
+# Max concurrent CLOB requests
+CLOB_WORKERS = 20
+
+# ─── Input limits ─────────────────────────────────────────────────────────────
+# Prevents oversized strings reaching SQLite LIKE or the LLM prompt
+MAX_SEARCH_LEN = 200
+MAX_LABEL_LEN = 80
+# Ethereum addresses are always exactly 42 characters (0x + 40 hex chars)
+ADDRESS_RE = re.compile(r'^0x[0-9a-fA-F]{40}$')
+# Market IDs from Polymarket are numeric strings — reject anything else
+MARKET_ID_RE = re.compile(r'^[0-9]+$')
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.on_event("startup")
+def startup():
+    init_db()
+
+@app.get("/")
+def serve_dashboard():
+    return FileResponse("static/index.html")
+
+def _validate_address(address: str) -> str:
+    """Raises 400 if address is not a valid 42-char 0x Ethereum address."""
+    if not ADDRESS_RE.match(address):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid address. Must be a 42-character 0x Ethereum address."
+        )
+    return address
+
+def _enrich_market(m: dict) -> dict | None:
+    """
+    Fetches CLOB history for a single market and attaches shift + current_price.
+    Returns None if the market should be excluded (settled or no data).
+    """
+    clob_token_id = m.get("clob_token_id")
+    m['shift'] = 0.0
+    m['current_price'] = None
+
+    if clob_token_id:
+        history = get_price_history(clob_token_id)
+        if history:
+            m['current_price'] = float(history[-1]["p"])
+            if len(history) >= 2:
+                m['shift'] = round((float(history[-1]["p"]) - float(history[0]["p"])) * 100, 1)
+    else:
+        try:
+            db = get_db()
+            snap = db.execute(
+                "SELECT prices FROM snapshots WHERE market_id = ? ORDER BY timestamp DESC LIMIT 1",
+                (m['id'],)
+            ).fetchone()
+            db.close()
+            if snap:
+                prices = json.loads(snap['prices'])
+                if prices:
+                    val = float(prices[0])
+                    m['current_price'] = val
+        except Exception:
+            pass
+
+    # Drop settled markets
+    if m['current_price'] is not None:
+        if m['current_price'] > 0.98 or m['current_price'] < 0.02:
+            return None
+
+    return m
+
+
+@app.get("/markets")
+def search_markets(
+    limit: int = 50,
+    search: str = None,
+    vol_min: float = Query(default=None, ge=0, description="Minimum volume (inclusive)"),
+    vol_max: float = Query(default=None, ge=0, description="Maximum volume (inclusive)"),
+):
+    # Reject oversized search strings before they reach SQLite
+    if search is not None and len(search) > MAX_SEARCH_LEN:
+        raise HTTPException(status_code=400, detail=f"Search query too long (max {MAX_SEARCH_LEN} chars).")
+
+    db = get_db()
+    try:
+        query = "SELECT * FROM markets"
+        params = []
+        if search:
+            query += " WHERE question LIKE ?"
+            params.append(f"%{search}%")
+
+        all_markets = [dict(r) for r in db.execute(query, params).fetchall()]
+    finally:
+        db.close()
+
+    # Volume pre-filter: use MIN_VOLUME_FOR_CLOB as default floor when no search,
+    # then apply any user-supplied bounds on top.
+    volume_floor = MIN_VOLUME_FOR_CLOB if not search else 0
+
+    candidates = []
+    for m in all_markets:
+        vol = m.get('volume') or 0
+        if vol < volume_floor:
+            continue
+        if vol_min is not None and vol < vol_min:
+            continue
+        if vol_max is not None and vol > vol_max:
+            continue
+        candidates.append(m)
+
+    enriched = []
+    with ThreadPoolExecutor(max_workers=CLOB_WORKERS) as executor:
+        futures = {executor.submit(_enrich_market, m): m for m in candidates}
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if result is not None:
+                    enriched.append(result)
+            except Exception as e:
+                log.error(f"Market enrichment failed: {e}")
+
+    enriched.sort(key=lambda x: (abs(x.get('shift', 0.0)), x.get('volume') or 0.0), reverse=True)
+    return enriched[:limit]
+
+
+@app.get("/watchlist")
+def get_watchlist():
+    db = get_db()
+    try:
+        res = db.execute("SELECT * FROM watch_list ORDER BY added_at DESC").fetchall()
+        return [dict(r) for r in res]
+    finally:
+        db.close()
+
+@app.get("/wallets/{address}/unmask")
+def unmask_wallet(address: str):
+    _validate_address(address)
+    real_owner = unmask_proxy(address)
+    return {"proxy": address, "real_owner": real_owner}
+
+
+@app.get("/markets/{market_id}/ai-analysis")
+def get_ai_analysis(
+    market_id: str,
+    research: bool = Query(default=False, description="Enable Tavily web research for news context")
+):
+    """
+    Run AI analysis on a market.
+    Set ?research=true to include Tavily web search context (requires TAVILY_API_KEY).
+    Set ?research=false (default) to skip web search and use price data only.
+    """
+    # Reject non-numeric market IDs — Polymarket IDs are always numeric
+    if not MARKET_ID_RE.match(market_id):
+        raise HTTPException(status_code=400, detail="Invalid market ID format.")
+
+    db = get_db()
+    try:
+        market = db.execute("SELECT * FROM markets WHERE id = ?", (market_id,)).fetchone()
+        if not market:
+            raise HTTPException(status_code=404, detail="Market not found")
+
+        market = dict(market)
+        price_history = None
+
+        if market.get("clob_token_id"):
+            price_history = get_history_as_price_list(market["clob_token_id"])
+
+        if not price_history:
+            raw = db.execute(
+                "SELECT prices FROM snapshots WHERE market_id = ? ORDER BY timestamp DESC LIMIT 5",
+                (market_id,)
+            ).fetchall()
+            price_history = [h['prices'] for h in raw]
+
+        analysis = analyst.analyze_market_shift(
+            market['question'],
+            price_history,
+            market['volume'],
+            use_research=research
+        )
+        return {"analysis": analysis, "research_used": research}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"LLM Analysis failed for {market_id}: {e}")
+        raise HTTPException(status_code=500, detail="AI analysis failed.")
+    finally:
+        db.close()
+
+
+class Target(BaseModel):
+    address: str
+    label: str
+
+    @field_validator('address')
+    @classmethod
+    def validate_address(cls, v):
+        v = v.strip()
+        if not ADDRESS_RE.match(v):
+            raise ValueError("Must be a 42-character 0x Ethereum address.")
+        return v
+
+    @field_validator('label')
+    @classmethod
+    def validate_label(cls, v):
+        v = v.strip()
+        if not v:
+            raise ValueError("Label cannot be empty.")
+        if len(v) > MAX_LABEL_LEN:
+            raise ValueError(f"Label too long (max {MAX_LABEL_LEN} chars).")
+        return v
+
+@app.post("/watchlist")
+def add_to_watchlist(target: Target):
+    db = get_db()
+    try:
+        db.execute(
+            "INSERT INTO watch_list (address, label, added_at) VALUES (?, ?, datetime('now'))",
+            (target.address, target.label)
+        )
+        db.commit()
+        return {"status": "success", "resolved_address": target.address}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Failed to add target: {e}")
+        raise HTTPException(status_code=400, detail="This 0x address is already in your watchlist.")
+    finally:
+        db.close()
+
+@app.get("/wallets/{address}/profile")
+def profile_wallet_api(address: str):
+    _validate_address(address)
+    try:
+        real_owner = unmask_proxy(address)
+
+        from config import Config
+        url = f"{Config.DATA_API}/trades?user={address}&limit=15"
+        resp = requests.get(url, timeout=10)
+        trades_data = resp.json() if resp.status_code == 200 else []
+
+        simplified_trades = [
+            f"Bought {t.get('side')} on '{t.get('title')}' for ${t.get('size')}"
+            for t in trades_data
+        ]
+        profile = analyst.profile_wallet(address, real_owner, simplified_trades)
+
+        return {"profile": profile, "real_owner": real_owner}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Profiling failed: {e}")
+        raise HTTPException(status_code=500, detail="AI Profiling failed.")
+
+@app.delete("/watchlist/{address}")
+def remove_from_watchlist(address: str):
+    _validate_address(address)
+    db = get_db()
+    try:
+        db.execute("DELETE FROM watch_list WHERE address = ?", (address,))
+        db.commit()
+        return {"status": "deleted"}
+    except Exception as e:
+        log.error(f"Failed to delete target {address}: {e}")
+        raise HTTPException(status_code=500, detail="Database error during deletion.")
+    finally:
+        db.close()
+
+
+### FILE: clob.py ###
+import requests
+from logger import get_logger
+
+log = get_logger("CLOB")
+
+CLOB_BASE = "https://clob.polymarket.com"
+
+# How far back to look when calculating shift.
+# "1d" gives a meaningful window even on a freshly restarted instance.
+# Options: "1h", "6h", "1d", "1w", "max"
+DEFAULT_INTERVAL = "1d"
+
+# Resolution in minutes — 60 gives ~24 data points over 1d, enough for trend without hammering the API
+DEFAULT_FIDELITY = 60
+
+# Polymarket's CLOB endpoint uses a self-signed cert in its chain — disable verification
+_SSL_VERIFY = False
+
+# Suppress the urllib3 warning that fires when verify=False
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+def get_price_history(clob_token_id: str, interval: str = DEFAULT_INTERVAL, fidelity: int = DEFAULT_FIDELITY):
+    """
+    Fetches historical price data for a CLOB token from Polymarket.
+    Returns a list of {"t": unix_timestamp, "p": price} dicts, oldest first.
+    Returns None if the request fails.
+    """
+    try:
+        resp = requests.get(
+            f"{CLOB_BASE}/prices-history",
+            params={
+                "market": clob_token_id,
+                "interval": interval,
+                "fidelity": fidelity,
+            },
+            timeout=10,
+            verify=_SSL_VERIFY,
+        )
+        if resp.status_code != 200:
+            log.warning(f"CLOB history returned {resp.status_code} for token {clob_token_id}")
+            return None
+
+        history = resp.json().get("history", [])
+        if not history:
+            return None
+
+        return sorted(history, key=lambda x: x["t"])
+
+    except Exception as e:
+        log.error(f"CLOB history fetch failed for token {clob_token_id}: {e}")
+        return None
+
+
+def get_shift(clob_token_id: str, interval: str = DEFAULT_INTERVAL) -> float | None:
+    """
+    Returns the price shift (as a float, e.g. 0.12 = 12%) over the given interval.
+    Compares the oldest and newest data points in the history window.
+    Returns None if history is unavailable or too short.
+    """
+    history = get_price_history(clob_token_id, interval=interval)
+    if not history or len(history) < 2:
+        return None
+
+    price_then = float(history[0]["p"])
+    price_now = float(history[-1]["p"])
+    return price_now - price_then
+
+
+def get_history_as_price_list(clob_token_id: str, interval: str = DEFAULT_INTERVAL) -> list[float] | None:
+    """
+    Returns a flat list of prices oldest-to-newest, suitable for passing to the LLM analyst.
+    """
+    history = get_price_history(clob_token_id, interval=interval)
+    if not history:
+        return None
+    return [float(h["p"]) for h in history]
+
+
+### FILE: config.py ###
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class Config:
+    DB_NAME = "polysint_core.db"
+
+    # Polymarket specific endpoints
+    GAMMA_API = "https://gamma-api.polymarket.com/markets"
+    DATA_API = "https://data-api.polymarket.com"
+
+    # Blockchain RPC
+    RPC_URL = os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
+
+    # LLM
+    LLM_API_KEY = os.getenv("LLM_API_KEY")
+    LLM_BASE_URL = os.getenv("LLM_API_BASE_URL")
+    LLM_MODEL = os.getenv("ANALYSIS_MODEL")
+
+    # Webhook Configurations
+    DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+    # Web Research (Tavily)
+    # Set ENABLE_WEB_RESEARCH=true in .env to enable for background daemons.
+    # Defaults to False — avoids 400 errors if TAVILY_API_KEY is missing/broken.
+    ENABLE_WEB_RESEARCH = os.getenv("ENABLE_WEB_RESEARCH", "false").lower() == "true"
+
+
+### FILE: db.py ###
+import sqlite3
+from config import Config
+from logger import get_logger
+
+log = get_logger("Database")
+
+def get_db():
+    try:
+        conn = sqlite3.connect(Config.DB_NAME)
+        conn.row_factory = sqlite3.Row
+        # This allows multiple readers and one writer to coexist
+        conn.execute("PRAGMA journal_mode=WAL;")
+        return conn
+    except Exception as e:
+        log.critical(f"Database connection failed: {e}")
+        raise
+
+def init_db():
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # Markets Table — clob_token_id stores the YES outcome token for CLOB history lookups
+    cursor.execute('''CREATE TABLE IF NOT EXISTS markets 
+        (id TEXT PRIMARY KEY, question TEXT, outcomes TEXT, volume REAL, created_at TEXT, clob_token_id TEXT)''')
+
+    # Migrate existing deployments: add clob_token_id column if it doesn't exist yet
+    existing_columns = [row[1] for row in cursor.execute("PRAGMA table_info(markets)").fetchall()]
+    if "clob_token_id" not in existing_columns:
+        cursor.execute("ALTER TABLE markets ADD COLUMN clob_token_id TEXT")
+        log.warning("Migrated markets table: added clob_token_id column")
+
+    # Snapshots Table — kept for fallback if CLOB history is unavailable
+    cursor.execute('''CREATE TABLE IF NOT EXISTS snapshots 
+        (id INTEGER PRIMARY KEY AUTOINCREMENT, market_id TEXT, timestamp DATETIME, prices TEXT, volume REAL)''')
+
+    # Watchlist Table
+    cursor.execute('''CREATE TABLE IF NOT EXISTS watch_list 
+        (address TEXT PRIMARY KEY, label TEXT, added_at DATETIME)''')
+
+    conn.commit()
+    conn.close()
+
+
+### FILE: harvest.py ###
+import requests
+import json
+import time
+from datetime import datetime
+from config import Config
+from db import get_db, init_db
+from logger import get_logger
+
+log = get_logger("Harvester")
+
+
+def extract_first_price(outcome_prices):
+    """
+    Safely extracts the first (YES) outcome price from whatever shape Gamma returns.
+    Handles:
+      - Already a list of floats/strings: ["0.5", "0.5"]
+      - Double-encoded string: "[['0.5', '0.5']]"
+      - Nested list (any depth): [[["0.5", "0.5"]]]
+      - Dict with price key: [{"price": "0.5"}, ...]
+      - None/null input
+      - Empty strings
+    Returns a JSON string of a flat list of strings, e.g. '["0.5", "0.5"]'.
+    Returns '[]' on any failure.
+    """
+    try:
+        # Handle None/null input
+        if outcome_prices is None:
+            return '[]'
+
+        # Handle empty string input
+        if isinstance(outcome_prices, str):
+            outcome_prices = outcome_prices.strip()
+            if not outcome_prices:
+                return '[]'
+            try:
+                outcome_prices = json.loads(outcome_prices)
+            except json.JSONDecodeError:
+                log.warning(f"outcomePrices is not valid JSON: {repr(outcome_prices)[:100]}")
+                return '[]'
+
+        # After parsing, check for None again (JSON null)
+        if outcome_prices is None:
+            return '[]'
+
+        # Must be a list at this point
+        if not isinstance(outcome_prices, list):
+            log.warning(f"outcomePrices is not a list after parsing: {type(outcome_prices).__name__}")
+            return '[]'
+
+        if not outcome_prices:
+            return '[]'
+
+        # Recursively unwrap nested lists until we find a non-list first element
+        while outcome_prices and isinstance(outcome_prices[0], list):
+            outcome_prices = outcome_prices[0]
+
+        if not outcome_prices:
+            return '[]'
+
+        # Now we should have a flat list - extract prices from dicts or use values directly
+        validated = []
+        for item in outcome_prices:
+            price = None
+            
+            # Handle dict with price key: {"price": "0.5"} or {"p": "0.5"}
+            if isinstance(item, dict):
+                price = item.get('price') or item.get('p')
+            # Handle string or numeric values
+            elif isinstance(item, (str, int, float)):
+                price = item
+            # Handle nested single-item lists as items: [["0.5"]]
+            elif isinstance(item, list) and len(item) == 1:
+                price = item[0]
+            
+            # Validate the extracted price is float-castable
+            if price is not None:
+                try:
+                    float(price)
+                    validated.append(str(price))
+                except (TypeError, ValueError):
+                    pass  # skip malformed entries
+
+        return json.dumps(validated)
+
+    except Exception as e:
+        # Safely log with truncation to avoid log spam
+        preview = repr(outcome_prices)[:100] if outcome_prices else 'None'
+        log.warning(f"Failed to parse outcomePrices '{preview}': {e}")
+        return '[]'
+
+def fetch_active_markets(session):
+    """Paginates through the Polymarket API to get all active markets."""
+    print(f"[{datetime.now()}] Fetching active markets from Polymarket...")
+    all_markets = []
+    limit = 100
+    offset = 0
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+    }
+
+    session = requests.Session()
+    session.headers.update(headers)
+
+    while True:
+        params = {
+            "active": "true",
+            "closed": "false",
+            "limit": limit,
+            "offset": offset
+        }
+
+        try:
+            response = session.get(Config.GAMMA_API, params=params, timeout=15)
+
+            if response.status_code == 429:
+                print(f"Rate limited at offset {offset}. Sleeping for 10 seconds...")
+                time.sleep(10)
+                continue
+
+            if response.status_code != 200:
+                print(f"Error fetching data at offset {offset}: HTTP {response.status_code}")
+                break
+
+            data = response.json()
+            if not data:
+                break
+
+            all_markets.extend(data)
+            offset += limit
+
+            if offset % 1000 == 0:
+                print(f" -> Fetched {offset} markets...")
+
+            time.sleep(0.5)
+
+        except requests.exceptions.SSLError:
+            print(f"\n[!] SSL Error at offset {offset}. Try adding verify=False to session.get()")
+            break
+
+        except Exception as e:
+            log.warning(f"Network glitch at offset {offset}: {e}")
+            print(f"\n[!] Network glitch at offset {offset}: {e}. Retrying in 5 seconds...")
+            time.sleep(5)
+            continue
+
+    print(f"[{datetime.now()}] Successfully fetched {len(all_markets)} active markets.")
+    return all_markets
+
+
+def process_and_save(markets):
+    db = get_db()
+    cursor = db.cursor()
+    current_time = datetime.now().isoformat()
+
+    for market in markets:
+        outcomes_json = json.dumps(market.get("outcomes", []))
+
+        # Normalise outcomePrices into a clean flat JSON array before storing
+        prices_json = extract_first_price(market.get("outcomePrices", []))
+
+        # clobTokenIds comes back as a stringified JSON array e.g. '["111...","222..."]'
+        # Index 0 is the YES outcome token used for CLOB price history lookups
+        clob_token_id = None
+        raw_clob = market.get("clobTokenIds")
+        if raw_clob:
+            try:
+                token_ids = json.loads(raw_clob) if isinstance(raw_clob, str) else raw_clob
+                if token_ids and len(token_ids) > 0:
+                    clob_token_id = token_ids[0]
+            except Exception as e:
+                log.warning(f"Failed to parse clobTokenIds for market {market.get('id')}: {e}")
+
+        # INSERT OR REPLACE so clob_token_id gets backfilled on restarts.
+        # COALESCE preserves the original created_at timestamp.
+        cursor.execute('''
+            INSERT OR REPLACE INTO markets (id, question, outcomes, volume, created_at, clob_token_id)
+            VALUES (?, ?, ?, ?, COALESCE((SELECT created_at FROM markets WHERE id = ?), ?), ?)
+        ''', (
+            market.get("id"),
+            market.get("question"),
+            outcomes_json,
+            float(market.get("volume", 0)),
+            market.get("id"),
+            current_time,
+            clob_token_id
+        ))
+
+        cursor.execute('''
+            INSERT INTO snapshots (market_id, timestamp, prices, volume)
+            VALUES (?, ?, ?, ?)
+        ''', (market.get("id"), current_time, prices_json, float(market.get("volume", 0))))
+
+    db.commit()
+    db.close()
+
+
+if __name__ == "__main__":
+    init_db()
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+    })
+
+    try:
+        while True:
+            data = fetch_active_markets(session)
+            process_and_save(data)
+            time.sleep(900)
+    except KeyboardInterrupt:
+        print("Stopped.")
+
+
+### FILE: logger.py ###
+import logging
+
+# Configure logging to write to analyzer.log (matched to your .gitignore)
+logging.basicConfig(
+    filename='analyzer.log',
+    filemode='a', # Append mode
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.WARNING # Only logs WARNING, ERROR, and CRITICAL
+)
+
+def get_logger(name):
+    return logging.getLogger(name)
+
+### FILE: notifier.py ###
+import requests
+from config import Config
+from logger import get_logger
+
+log = get_logger("Notifier")
+
+class Notifier:
+    def __init__(self):
+        self.discord_url = Config.DISCORD_WEBHOOK_URL
+        self.tg_token = Config.TELEGRAM_BOT_TOKEN
+        self.tg_chat_id = Config.TELEGRAM_CHAT_ID
+
+    def send_discord(self, message: str, title: str = "PolySINT Alert"):
+        if not self.discord_url:
+            return
+        
+        payload = {
+            "embeds":[
+                {
+                    "title": title,
+                    "description": message,
+                    "color": 16711680  # Alert Red
+                }
+            ]
+        }
+        try:
+            resp = requests.post(self.discord_url, json=payload, timeout=10)
+            resp.raise_for_status()
+        except Exception as e:
+            log.error(f"Discord broadcast failed: {e}")
+
+    def send_telegram(self, message: str, title: str = "PolySINT Alert"):
+        if not self.tg_token or not self.tg_chat_id:
+            return
+        
+        url = f"https://api.telegram.org/bot{self.tg_token}/sendMessage"
+        formatted_message = f"*{title}*\n\n{message}"
+        
+        payload = {
+            "chat_id": self.tg_chat_id,
+            "text": formatted_message,
+            "parse_mode": "Markdown"
+        }
+        try:
+            resp = requests.post(url, json=payload, timeout=10)
+            resp.raise_for_status()
+        except Exception as e:
+            log.error(f"Telegram broadcast failed: {e}")
+
+    def broadcast(self, message: str, title: str = "PolySINT Alert"):
+        """Pushes actionable OSINT to all configured external endpoints."""
+        self.send_discord(message, title)
+        self.send_telegram(message, title)
+        # Fallback console print
+        print(f"\n[{title}]\n{message}\n")
+
+### FILE: researcher.py ###
+import os
+import requests
+from dotenv import load_dotenv
+from logger import get_logger
+
+load_dotenv()
+log = get_logger("Researcher")
+
+MAX_QUERY_LENGTH = 100  # Tavily 400s on overly long queries
+
+class PolyResearcher:
+    def __init__(self):
+        self.api_key = os.getenv("TAVILY_API_KEY")
+
+    def get_market_context(self, market_question):
+        """Searches for real-world events related to the market question."""
+        if not self.api_key:
+            print("⚠️ [RESEARCHER] No TAVILY_API_KEY found in .env! Skipping web search.")
+            return "No search API key configured. Context unavailable."
+
+        # Truncate long questions to avoid Tavily 400 errors
+        query_text = market_question
+        if len(query_text) > MAX_QUERY_LENGTH:
+            query_text = query_text[:MAX_QUERY_LENGTH].rsplit(' ', 1)[0]  # trim at word boundary
+
+        print(f"🔎[RESEARCHER] Scouring the web for: '{query_text}'...")
+
+        url = "https://api.tavily.com/search"
+        payload = {
+            "api_key": self.api_key,
+            "query": f"latest news: {query_text}",
+            "search_depth": "basic",  # valid values: "ultra-fast", "fast", "basic", "advanced"
+            "include_domains": ["reuters.com", "apnews.com", "bloomberg.com", "twitter.com"],
+            "max_results": 5
+        }
+
+        try:
+            resp = requests.post(url, json=payload, timeout=15)
+            if resp.status_code == 200:
+                results = resp.json().get("results", [])
+                print(f"✅ [RESEARCHER] Found {len(results)} relevant news articles.")
+
+                if not results:
+                    return "No relevant news found."
+
+                context_parts = []
+                for r in results:
+                    title = r.get('title', 'Untitled')
+                    snippet = r.get('content', '')[:300]
+                    source_url = r.get('url', 'URL unavailable')
+                    published = r.get('published_date', 'Date unknown')
+                    context_parts.append(
+                        f"- TITLE: {title}\n"
+                        f"  DATE: {published}\n"
+                        f"  SOURCE: {source_url}\n"
+                        f"  SNIPPET: {snippet}..."
+                    )
+
+                return "\n\n".join(context_parts)
+
+            log.error(f"Tavily API error {resp.status_code} for query '{query_text}': {resp.text[:200]}")
+            print(f"❌ [RESEARCHER] API Error: {resp.status_code}")
+            return "Search failed (API Error)."
+        except Exception as e:
+            log.error(f"Search failed: {e}")
+            print("❌ [RESEARCHER] Network Error.")
+            return "Search failed (Network Error)."
+
+
+### FILE: start.py ###
+import subprocess
+import sys
+import time
+from datetime import datetime
+from logger import get_logger
+from notifier import Notifier
+
+log = get_logger("System")
+
+# Set how often you want the Heartbeat check-in (in seconds)
+# 21600 = 6 hours. (Change to 3600 for 1 hour, or 60 for testing)
+HEARTBEAT_INTERVAL = 21600 
+
+def start_engine():
+    print("🚀 Starting PolySINT Engine...")
+    processes =[]
+    notifier = Notifier()
+
+    try:
+        # 1. Start the FastAPI Server
+        print(" -> Launching API Server (Port 9000)...")
+        api_proc = subprocess.Popen([sys.executable, "-m", "uvicorn", "api:app", "--port", "9000"])
+        processes.append(("API Server", api_proc))
+        time.sleep(2)
+
+        # 2. Start the Harvester
+        print(" -> Launching Data Harvester...")
+        harvest_proc = subprocess.Popen([sys.executable, "harvest.py"])
+        processes.append(("Harvester Worker", harvest_proc))
+
+        # 3. Start the Alerts
+        print(" -> Launching Anomaly Detector...")
+        alerts_proc = subprocess.Popen([sys.executable, "alerts.py"])
+        processes.append(("Alerts Worker", alerts_proc))
+
+        # 4. Start the Watcher
+        print(" -> Launching Whale Watcher...")
+        watcher_proc = subprocess.Popen([sys.executable, "watcher.py"])
+        processes.append(("Watcher Worker", watcher_proc))
+
+        print("\n✅ All systems nominal! PolySINT is fully operational.")
+        print("🛑 Press[Ctrl + C] to safely shut down all systems.\n")
+
+        # Send Boot Alert
+        notifier.broadcast(
+            message="**All PolySINT daemon workers have been successfully launched.**\nAwaiting anomalies and entity movements...",
+            title="🚀 System Boot: Online"
+        )
+
+        last_heartbeat = time.time()
+
+        # The Heartbeat Loop
+        while True:
+            time.sleep(10) # Quick loop so Ctrl+C stays responsive
+            current_time = time.time()
+            
+            # If the interval has passed, run the health check
+            if current_time - last_heartbeat >= HEARTBEAT_INTERVAL:
+                status_msg = "**Periodic Health Check:**\n"
+                all_healthy = True
+                
+                for name, p in processes:
+                    # p.poll() is None means the process is still running perfectly
+                    if p.poll() is None:
+                        status_msg += f"🟢 **{name}**: Online\n"
+                    else:
+                        status_msg += f"🔴 **{name}**: Offline (Crashed)\n"
+                        all_healthy = False
+                
+                # Change title/color based on health
+                title = "💚 System Heartbeat" if all_healthy else "⚠️ System Degraded"
+                
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Sending Heartbeat to Discord...")
+                notifier.broadcast(message=status_msg, title=title)
+                
+                last_heartbeat = current_time
+
+    except KeyboardInterrupt:
+        print("\n\n⚠️ Shutting down PolySINT Engine...")
+        
+        # Send Shutdown Alert
+        notifier.broadcast(message="System was manually shut down by the administrator.", title="🛑 System Offline")
+        
+        for name, p in processes:
+            print(f" -> Stopping {name}...")
+            p.terminate() 
+            p.wait()      
+        print("🛑 Shutdown complete. Goodbye!")
+        sys.exit(0)
+
+if __name__ == "__main__":
+    start_engine()
+
+### FILE: utils.py ###
+from web3 import Web3
+from config import Config
+from logger import get_logger
+log = get_logger("Blockchain")
+
+w3 = Web3(Web3.HTTPProvider(Config.RPC_URL))
+
+def unmask_proxy(proxy_address):
+    """Bypasses Polygonscan to find the real EOA owner of a Polymarket wallet."""
+    try:
+        response = w3.eth.call({
+            'to': w3.to_checksum_address(proxy_address),
+            'data': '0x7065c0d4' # getOwners() signature
+        })
+        
+        # If the response is empty, it's not a contract
+        if not response or response == b'':
+            return "Direct Wallet (Not a Proxy)"
+            
+        owner = w3.to_checksum_address("0x" + response.hex()[-40:])
+        return owner
+    except Exception as e:
+        # A revert error usually means the address is an EOA (Direct Wallet)
+        log.info(f"Unmask check for {proxy_address} failed (likely an EOA): {e}")
+        return "Direct Wallet (Not a Proxy)"
+
+### FILE: watcher.py ###
+import requests
+import time
+from config import Config
+from db import get_db
+from notifier import Notifier
+from logger import get_logger
+
+log = get_logger("Watcher")
+
+# In-memory cache to prevent spamming webhooks with already-seen trades
+seen_trades = set()
+
+def watch_wallets():
+    db = get_db()
+    tracked = db.execute("SELECT address, label FROM watch_list").fetchall()
+    db.close()
+
+    notifier = Notifier()
+
+    for row in tracked:
+        address = row['address']
+        label = row['label']
+        
+        url = f"{Config.DATA_API}/trades?user={address}&limit=5"
+        
+        try:
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200:
+                trades = resp.json()
+                for trade in trades:
+                    # Using transactionHash to uniquely identify a trade
+                    trade_id = trade.get('transactionHash') 
+                    
+                    if trade_id and trade_id not in seen_trades:
+                        seen_trades.add(trade_id)
+                        
+                        market_title = trade.get('title', 'Unknown Market')
+                        msg = f"**Entity:** `{label}`\n**Proxy Wallet:** `{address}`\n**Action:** Traded on _{market_title}_"
+                        
+                        notifier.broadcast(msg, title="🐳 OSINT Target Activity")
+        except Exception as e:
+            log.error(f"Failed to fetch trades for {address}: {e}")
+            
+        time.sleep(1) # Polite API spacing
+
+if __name__ == "__main__":
+    print("Wallet Watcher active...")
+    while True:
+        watch_wallets()
+        time.sleep(300) # Run every 5 minutes
+
+### FILE: static/app.js ###
+// ─── State ────────────────────────────────────────────────────────────────────
+let hasLoadedOnce = false;
+let refreshTimer = null;
+let refreshCountdown = 0;
+const REFRESH_INTERVAL = 300; // 5 minutes
+
+// ─── Init ──────────────────────────────────────────────────────────────────────
+document.addEventListener("DOMContentLoaded", () => {
+    loadWatchlist();
+    initResearchToggle();
+
+    // Search only fires on Enter — no debounce, no auto-fire on input
+    document.getElementById('searchInput').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            const q = e.target.value.trim();
+            loadMarkets(q);
+        }
+    });
+});
+
+// ─── Research Toggle ──────────────────────────────────────────────────────────
+function initResearchToggle() {
+    const saved = localStorage.getItem('polysint_research_enabled');
+    const enabled = saved === 'true'; // default false
+    document.getElementById('researchToggle').checked = enabled;
+    updateToggleLabel(enabled);
+}
+
+function onResearchToggle() {
+    const enabled = document.getElementById('researchToggle').checked;
+    localStorage.setItem('polysint_research_enabled', enabled);
+    updateToggleLabel(enabled);
+}
+
+function updateToggleLabel(enabled) {
+    const label = document.getElementById('researchToggleLabel');
+    if (enabled) {
+        label.textContent = 'Web Research: ON';
+        label.className = 'text-xs text-emerald-400 font-mono';
+    } else {
+        label.textContent = 'Web Research: OFF';
+        label.className = 'text-xs text-gray-500 font-mono';
+    }
+}
+
+// Always read at click time — never at render time
+function isResearchEnabled() {
+    return document.getElementById('researchToggle').checked;
+}
+
+// ─── Idle / Empty States ──────────────────────────────────────────────────────
+function showIdleState() {
+    const table = document.getElementById('marketsTable');
+    const counter = document.getElementById('marketCounter');
+    if (counter) counter.textContent = '';
+
+    table.innerHTML = `
+        <tr>
+            <td colspan="4" class="py-16 text-center">
+                <div class="flex flex-col items-center space-y-4">
+                    <div class="text-5xl opacity-40">🕵️‍♂️</div>
+                    <div class="text-gray-400 text-sm font-medium">Intelligence awaiting orders.</div>
+                    <div class="text-gray-600 text-xs max-w-xs">Search for a specific market above and press Enter, or load all active movers.</div>
+                    <button onclick="loadMarkets('')"
+                        class="mt-2 bg-polysint text-gray-900 font-bold px-5 py-2 rounded-lg text-sm hover:bg-emerald-400 transition-all shadow-lg shadow-emerald-900/30">
+                        Load Top Markets
+                    </button>
+                </div>
+            </td>
+        </tr>`;
+}
+
+function showLoadingState() {
+    const table = document.getElementById('marketsTable');
+    table.innerHTML = `
+        <tr>
+            <td colspan="4" class="py-16 text-center">
+                <div class="flex flex-col items-center space-y-3">
+                    <div class="flex space-x-1">
+                        <div class="w-2 h-2 bg-polysint rounded-full animate-bounce" style="animation-delay:0ms"></div>
+                        <div class="w-2 h-2 bg-polysint rounded-full animate-bounce" style="animation-delay:150ms"></div>
+                        <div class="w-2 h-2 bg-polysint rounded-full animate-bounce" style="animation-delay:300ms"></div>
+                    </div>
+                    <div class="text-gray-400 text-sm">Scanning intelligence feeds...</div>
+                </div>
+            </td>
+        </tr>`;
+}
+
+function showEmptySearchState(query) {
+    const table = document.getElementById('marketsTable');
+    table.innerHTML = `
+        <tr>
+            <td colspan="4" class="py-16 text-center">
+                <div class="flex flex-col items-center space-y-3">
+                    <div class="text-4xl opacity-30">🔍</div>
+                    <div class="text-gray-400 text-sm">No markets found for <span class="text-white font-mono">"${query}"</span></div>
+                    <div class="text-gray-600 text-xs">Try a broader term or check the harvester has run.</div>
+                </div>
+            </td>
+        </tr>`;
+}
+
+// ─── Auto-Refresh ─────────────────────────────────────────────────────────────
+function startAutoRefresh(query) {
+    clearInterval(refreshTimer);
+    refreshCountdown = REFRESH_INTERVAL;
+    updateRefreshUI();
+
+    refreshTimer = setInterval(() => {
+        refreshCountdown -= 1;
+        updateRefreshUI();
+        if (refreshCountdown <= 0) {
+            loadMarkets(query, true); // silent refresh
+        }
+    }, 1000);
+}
+
+function updateRefreshUI() {
+    const el = document.getElementById('refreshCountdown');
+    if (!el) return;
+    if (refreshCountdown > 0) {
+        const mins = Math.floor(refreshCountdown / 60);
+        const secs = refreshCountdown % 60;
+        el.textContent = `Auto-refresh in ${mins}:${secs.toString().padStart(2, '0')}`;
+    } else {
+        el.textContent = 'Refreshing...';
+    }
+}
+
+// ─── Core: Load Markets ───────────────────────────────────────────────────────
+const formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+
+async function loadMarkets(searchQuery = '', silent = false) {
+    if (!silent) showLoadingState();
+
+    // Read volume filter values — empty means no bound applied
+    const volMin = document.getElementById('volMin')?.value.trim();
+    const volMax = document.getElementById('volMax')?.value.trim();
+
+    try {
+        const params = new URLSearchParams();
+        if (searchQuery) params.set('search', searchQuery);
+        if (volMin !== '') params.set('vol_min', volMin);
+        if (volMax !== '') params.set('vol_max', volMax);
+
+        const url = `/markets${params.toString() ? '?' + params.toString() : ''}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Backend Error ${res.status}`);
+
+        const markets = await res.json();
+        hasLoadedOnce = true;
+
+        const counter = document.getElementById('marketCounter');
+        if (counter) counter.textContent = markets.length > 0 ? `${markets.length} markets` : '';
+
+        const table = document.getElementById('marketsTable');
+        table.innerHTML = '';
+
+        if (markets.length === 0) {
+            showEmptySearchState(searchQuery || 'active markets');
+            return;
+        }
+
+        markets.forEach((m, i) => {
+            const shift = m.shift || 0;
+            const absShift = Math.abs(shift);
+            const shiftColor = shift > 0 ? 'text-emerald-400' : (shift < 0 ? 'text-red-400' : 'text-gray-500');
+            const shiftIcon = shift > 0 ? '↑' : (shift < 0 ? '↓' : '–');
+            const isAnomaly = absShift >= 10.0;
+            const isWarning = absShift >= 5.0 && absShift < 10.0;
+
+            const currentOdds = m.current_price != null
+                ? `${Math.round(m.current_price * 100)}%`
+                : 'N/A';
+
+            let anomalyBadge = '';
+            if (isAnomaly) {
+                anomalyBadge = `<span class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-bold bg-red-500/20 text-red-400 border border-red-500/40 animate-pulse">⚡ ANOMALY</span>`;
+            } else if (isWarning) {
+                anomalyBadge = `<span class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/40">⚠ WATCH</span>`;
+            }
+
+            const rowHighlight = isAnomaly
+                ? 'bg-red-500/5 hover:bg-red-500/10'
+                : 'hover:bg-gray-700/30';
+
+            const tr = document.createElement('tr');
+            tr.className = `transition-colors border-b border-gray-700/50 ${rowHighlight}`;
+            tr.style.animationDelay = `${i * 30}ms`;
+
+            // analyzeMarket reads isResearchEnabled() at click time — not baked in at render time
+            tr.innerHTML = `
+                <td class="px-4 py-4 font-medium text-gray-200">
+                    <div class="flex items-start flex-wrap gap-1">
+                        <span>${m.question}</span>
+                        ${anomalyBadge}
+                    </div>
+                    <div class="text-xs text-blue-400 mt-1 font-mono">Odds: ${currentOdds}</div>
+                </td>
+                <td class="px-4 py-4 font-mono ${shiftColor} font-bold text-sm">
+                    ${shiftIcon} ${absShift}%
+                    <div class="text-xs text-gray-600 font-normal">24h shift</div>
+                </td>
+                <td class="px-4 py-4 text-gray-400 text-xs">${formatter.format(m.volume)}</td>
+                <td class="px-4 py-4 text-right">
+                    <button onclick="analyzeMarket('${m.id}')"
+                        class="bg-polysint/10 text-polysint border border-polysint/30 hover:bg-polysint hover:text-white px-3 py-1 rounded text-xs transition-all shadow-sm whitespace-nowrap">
+                        🤖 Analyze
+                    </button>
+                </td>
+            `;
+            table.appendChild(tr);
+        });
+
+        startAutoRefresh(searchQuery);
+
+    } catch (e) {
+        console.error(e);
+        const table = document.getElementById('marketsTable');
+        table.innerHTML = `
+            <tr><td colspan="4" class="text-center py-10">
+                <div class="flex flex-col items-center space-y-3">
+                    <div class="text-3xl">⚠️</div>
+                    <div class="text-red-400 text-sm">Failed to load markets.</div>
+                    <div class="text-gray-600 text-xs">Is the backend running? Check <code>analyzer.log</code>.</div>
+                    <button onclick="loadMarkets('${searchQuery}')" class="mt-2 text-xs text-polysint underline">Retry</button>
+                </div>
+            </td></tr>`;
+    }
+}
+
+// ─── AI Analysis Modal ────────────────────────────────────────────────────────
+// useResearch is read live from the toggle at click time — not passed from render time
+async function analyzeMarket(marketId) {
+    const useResearch = isResearchEnabled();
+
+    const modal = document.getElementById('aiModal');
+    const content = document.getElementById('aiModalContent');
+    const modalTitle = document.getElementById('aiModalTitle');
+
+    modal.classList.remove('hidden');
+
+    const researchNote = useResearch
+        ? '<span class="text-xs bg-emerald-900/40 text-emerald-400 border border-emerald-800/50 px-2 py-0.5 rounded font-mono ml-2">+ Web Research</span>'
+        : '<span class="text-xs bg-gray-800 text-gray-500 border border-gray-700 px-2 py-0.5 rounded font-mono ml-2">No Web Research</span>';
+
+    modalTitle.innerHTML = `🤖 PolySINT Intelligence ${researchNote}`;
+
+    content.innerHTML = `
+        <div class="flex flex-col items-center justify-center space-y-3 py-12">
+            <div class="flex space-x-1">
+                <div class="w-2 h-2 bg-polysint rounded-full animate-bounce" style="animation-delay:0ms"></div>
+                <div class="w-2 h-2 bg-polysint rounded-full animate-bounce" style="animation-delay:150ms"></div>
+                <div class="w-2 h-2 bg-polysint rounded-full animate-bounce" style="animation-delay:300ms"></div>
+            </div>
+            <div class="text-polysint text-sm animate-pulse">
+                ${useResearch ? 'Scanning web + running LLM analysis...' : 'Running LLM analysis...'}
+            </div>
+            ${!useResearch ? '<div class="text-gray-600 text-xs">Enable Web Research in the toolbar for news context.</div>' : ''}
+        </div>`;
+
+    try {
+        const url = `/markets/${marketId}/ai-analysis?research=${useResearch}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error("AI Analysis Failed");
+        const data = await res.json();
+
+        const formatted = data.analysis
+            .replace(/\*\*(.*?)\*\*/g, '<strong class="text-white">$1</strong>')
+            .replace(/\n/g, '<br>');
+
+        content.innerHTML = `<div class="p-3 border-l-4 border-polysint bg-gray-900/60 rounded-r leading-relaxed">${formatted}</div>`;
+    } catch (e) {
+        content.innerHTML = `
+            <div class="text-red-400 bg-red-900/20 p-4 rounded border border-red-800 text-sm">
+                ⚠️ Could not generate intelligence brief.<br>
+                <span class="text-xs text-gray-500 mt-1 block">Check your LLM API key and <code>analyzer.log</code>.</span>
+            </div>`;
+    }
+}
+
+// ─── Wallet / Entity ──────────────────────────────────────────────────────────
+async function profileEntity(address, label) {
+    const modal = document.getElementById('aiModal');
+    const content = document.getElementById('aiModalContent');
+    const modalTitle = document.getElementById('aiModalTitle');
+
+    modal.classList.remove('hidden');
+    modalTitle.innerHTML = `🧠 Entity Profile — ${label}`;
+
+    content.innerHTML = `
+        <div class="flex flex-col items-center justify-center space-y-3 py-12">
+            <div class="flex space-x-1">
+                <div class="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style="animation-delay:0ms"></div>
+                <div class="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style="animation-delay:150ms"></div>
+                <div class="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style="animation-delay:300ms"></div>
+            </div>
+            <div class="text-blue-400 text-sm animate-pulse">Fetching on-chain history & profiling...</div>
+        </div>`;
+
+    try {
+        const res = await fetch(`/wallets/${address}/profile`);
+        if (!res.ok) throw new Error("Profiling Failed");
+        const data = await res.json();
+
+        const formatted = data.profile
+            .replace(/\*\*(.*?)\*\*/g, '<strong class="text-white">$1</strong>')
+            .replace(/\n/g, '<br>');
+
+        content.innerHTML = `
+            <div class="mb-4 p-3 bg-gray-900 rounded border border-gray-700 font-mono text-xs text-gray-400 space-y-1">
+                <div><span class="text-gray-600">Proxy:</span> ${address}</div>
+                <div><span class="text-gray-600">EOA:</span> <span class="text-polysint">${data.real_owner}</span></div>
+            </div>
+            <div class="p-3 border-l-4 border-blue-500 bg-gray-900/60 rounded-r leading-relaxed">${formatted}</div>`;
+    } catch (e) {
+        content.innerHTML = `<div class="text-red-400 bg-red-900/20 p-4 rounded border border-red-800 text-sm">⚠️ Could not generate entity profile.</div>`;
+    }
+}
+
+async function unmaskWallet(address) {
+    const btn = document.getElementById(`btn-${address}`);
+    const realDiv = document.getElementById(`real-${address}`);
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="animate-pulse">Scanning...</span>';
+    btn.classList.add("opacity-50", "cursor-not-allowed");
+
+    try {
+        const res = await fetch(`/wallets/${address}/unmask`);
+        const data = await res.json();
+
+        realDiv.classList.remove("hidden");
+        realDiv.innerHTML = `EOA: <span class="text-polysint">${data.real_owner}</span>`;
+        btn.textContent = "✓ Unmasked";
+        btn.classList.remove("border-gray-600", "text-gray-300", "hover:bg-gray-700");
+        btn.classList.add("bg-gray-700", "text-gray-500", "border-transparent", "cursor-default");
+    } catch (e) {
+        btn.disabled = false;
+        btn.textContent = "Retry";
+        btn.classList.remove("opacity-50", "cursor-not-allowed");
+        alert("Failed to unmask wallet. Check RPC configuration.");
+    }
+}
+
+// ─── Watchlist ────────────────────────────────────────────────────────────────
+async function addTarget() {
+    const addressInput = document.getElementById('newAddress');
+    const labelInput = document.getElementById('newLabel');
+    const address = addressInput.value.trim();
+    const label = labelInput.value.trim();
+
+    if (!address || !label) {
+        showInlineError('addError', 'Both address and label are required.');
+        return;
+    }
+
+    try {
+        const res = await fetch('/watchlist', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ address, label })
+        });
+
+        const data = await res.json();
+        if (res.ok) {
+            addressInput.value = '';
+            labelInput.value = '';
+            clearInlineError('addError');
+            loadWatchlist();
+        } else {
+            showInlineError('addError', data.detail || 'Failed to add target.');
+        }
+    } catch (e) {
+        showInlineError('addError', 'Network error. Is the backend running?');
+    }
+}
+
+function showInlineError(id, msg) {
+    const el = document.getElementById(id);
+    if (el) { el.textContent = msg; el.classList.remove('hidden'); }
+}
+
+function clearInlineError(id) {
+    const el = document.getElementById(id);
+    if (el) { el.textContent = ''; el.classList.add('hidden'); }
+}
+
+async function loadWatchlist() {
+    const table = document.getElementById('watchlistTable');
+    try {
+        const res = await fetch('/watchlist');
+        const watchlist = await res.json();
+
+        table.innerHTML = '';
+        if (watchlist.length === 0) {
+            table.innerHTML = `
+                <tr><td class="text-center py-10 text-gray-600 text-sm italic px-4">
+                    Watchlist empty.<br>
+                    <span class="text-xs">Add a target's 0x proxy address above.</span>
+                </td></tr>`;
+            return;
+        }
+
+        watchlist.forEach(w => {
+            const shortAddr = w.address.substring(0, 6) + '…' + w.address.substring(w.address.length - 4);
+            const tr = document.createElement('tr');
+            tr.className = "hover:bg-gray-700/30 transition-colors border-b border-gray-700/50";
+            tr.innerHTML = `
+                <td class="px-4 py-3">
+                    <div class="font-semibold text-gray-200 text-sm">${w.label}</div>
+                    <div class="text-xs font-mono text-gray-500 mt-0.5">${shortAddr}</div>
+                    <div class="text-xs font-mono text-polysint mt-0.5 hidden" id="real-${w.address}"></div>
+                </td>
+                <td class="px-4 py-3 text-right">
+                    <div class="flex justify-end items-center gap-1 flex-wrap">
+                        <button onclick="unmaskWallet('${w.address}')" id="btn-${w.address}"
+                            class="bg-gray-800 border border-gray-600 text-gray-300 hover:bg-gray-700 px-2 py-1 rounded text-xs transition-all">
+                            Unmask
+                        </button>
+                        <button onclick="profileEntity('${w.address}', '${w.label}')"
+                            class="bg-blue-900/40 text-blue-400 border border-blue-800 hover:bg-blue-800 hover:text-white px-2 py-1 rounded text-xs transition-all">
+                            AI Profile
+                        </button>
+                        <button onclick="deleteTarget('${w.address}')" title="Stop Tracking"
+                            class="bg-red-900/30 text-red-400 border border-red-800 hover:bg-red-800 hover:text-white px-2 py-1 rounded text-xs transition-all">
+                            ✕
+                        </button>
+                    </div>
+                </td>`;
+            table.appendChild(tr);
+        });
+    } catch (e) {
+        table.innerHTML = `<tr><td class="text-center py-8 text-red-400 text-sm">Failed to load watchlist.</td></tr>`;
+    }
+}
+
+async function deleteTarget(address) {
+    if (!confirm("Stop tracking this entity?")) return;
+    try {
+        const res = await fetch(`/watchlist/${address}`, { method: 'DELETE' });
+        if (res.ok) loadWatchlist();
+        else alert("Failed to delete target.");
+    } catch (e) { console.error(e); }
+}
+
+function closeModal() {
+    document.getElementById('aiModal').classList.add('hidden');
+}
+
+document.addEventListener('click', (e) => {
+    const modal = document.getElementById('aiModal');
+    if (e.target === modal) closeModal();
+});

@@ -1,0 +1,351 @@
+I'll optimize the market search endpoint by moving volume filtering to the database query instead of post-processing in Python. This eliminates the need to fetch low-volume markets from the database in the first place.
+
+Here are the changes to `api.py`:
+
+```python
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from db import get_db, init_db
+from analyst import PolyAnalyst
+from utils import unmask_proxy
+from logger import get_logger
+from clob import get_shift, get_price_history, get_history_as_price_list, DEFAULT_INTERVAL
+from pydantic import BaseModel, field_validator
+import re
+import requests
+import json
+
+log = get_logger("API")
+
+app = FastAPI(title="PolySINT Core Engine")
+analyst = PolyAnalyst()
+
+# Pre-filter: only consider markets above this volume before hitting CLOB.
+MIN_VOLUME_FOR_CLOB = 5000
+
+# Max concurrent CLOB requests
+CLOB_WORKERS = 20
+
+# ─── Input limits ─────────────────────────────────────────────────────────────
+MAX_SEARCH_LEN = 200
+MAX_LABEL_LEN = 80
+ADDRESS_RE = re.compile(r'^0x[0-9a-fA-F]{40}$')
+MARKET_ID_RE = re.compile(r'^[0-9]+$')
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.on_event("startup")
+def startup():
+    init_db()
+
+@app.get("/")
+def serve_dashboard():
+    return FileResponse("static/index.html")
+
+def _validate_address(address: str) -> str:
+    """Raises 400 if address is not a valid 42-char 0x Ethereum address."""
+    if not ADDRESS_RE.match(address):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid address. Must be a 42-character 0x Ethereum address."
+        )
+    return address
+
+def _enrich_market(m: dict) -> dict | None:
+    """
+    Fetches CLOB history for a single market and attaches shift + current_price.
+    Returns None if the market should be excluded (settled or no data).
+    """
+    clob_token_id = m.get("clob_token_id")
+    m['shift'] = 0.0
+    m['current_price'] = None
+
+    if clob_token_id:
+        history = get_price_history(clob_token_id)
+        if history:
+            m['current_price'] = float(history[-1]["p"])
+            if len(history) >= 2:
+                m['shift'] = round((float(history[-1]["p"]) - float(history[0]["p"])) * 100, 1)
+    else:
+        try:
+            db = get_db()
+            snap = db.execute(
+                "SELECT prices FROM snapshots WHERE market_id = ? ORDER BY timestamp DESC LIMIT 1",
+                (m['id'],)
+            ).fetchone()
+            db.close()
+            if snap:
+                prices = json.loads(snap['prices'])
+                if prices:
+                    val = float(prices[0])
+                    m['current_price'] = val
+        except Exception:
+            pass
+
+    # Drop settled markets
+    if m['current_price'] is not None:
+        if m['current_price'] > 0.98 or m['current_price'] < 0.02:
+            return None
+
+    return m
+
+
+@app.get("/markets")
+def search_markets(
+    limit: int = 50,
+    search: str = None,
+    vol_min: float = Query(default=None, ge=0, description="Minimum volume (inclusive)"),
+    vol_max: float = Query(default=None, ge=0, description="Maximum volume (inclusive)"),
+):
+    # Reject oversized search strings before they reach SQLite
+    if search is not None and len(search) > MAX_SEARCH_LEN:
+        raise HTTPException(status_code=400, detail=f"Search query too long (max {MAX_SEARCH_LEN} chars).")
+
+    db = get_db()
+    try:
+        # Build dynamic query with volume filtering at database level
+        query = "SELECT * FROM markets WHERE 1=1"
+        params = []
+        
+        # Search condition
+        if search:
+            query += " AND question LIKE ?"
+            params.append(f"%{search}%")
+        
+        # Volume pre-filter: use MIN_VOLUME_FOR_CLOB as default floor when no search,
+        # then apply any user-supplied bounds on top.
+        volume_floor = MIN_VOLUME_FOR_CLOB if not search else 0
+        
+        # Apply volume filters at database level
+        if volume_floor > 0 or vol_min is not None or vol_max is not None:
+            # Build volume condition
+            volume_conditions = []
+            
+            # Minimum volume (use the greater of volume_floor or user's vol_min)
+            effective_min = max(volume_floor, vol_min) if vol_min is not None else volume_floor
+            if effective_min > 0:
+                volume_conditions.append("COALESCE(volume, 0) >= ?")
+                params.append(effective_min)
+            
+            # Maximum volume (if specified)
+            if vol_max is not None:
+                volume_conditions.append("COALESCE(volume, 0) <= ?")
+                params.append(vol_max)
+            
+            if volume_conditions:
+                query += " AND " + " AND ".join(volume_conditions)
+        
+        # Order by volume descending to prioritize higher-volume markets
+        query += " ORDER BY COALESCE(volume, 0) DESC"
+        
+        all_markets = [dict(r) for r in db.execute(query, params).fetchall()]
+    finally:
+        db.close()
+
+    # No need for Python-side volume filtering - it's already in the database query
+    # Markets are already filtered by volume and sorted by volume descending
+
+    enriched = []
+    with ThreadPoolExecutor(max_workers=CLOB_WORKERS) as executor:
+        futures = {executor.submit(_enrich_market, m): m for m in all_markets}
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if result is not None:
+                    enriched.append(result)
+            except Exception as e:
+                log.error(f"Market enrichment failed: {e}")
+
+    # Sort by absolute shift and volume, already partially sorted by volume from DB
+    enriched.sort(key=lambda x: (abs(x.get('shift', 0.0)), x.get('volume') or 0.0), reverse=True)
+    return enriched[:limit]
+
+
+@app.get("/watchlist")
+def get_watchlist():
+    db = get_db()
+    try:
+        res = db.execute("SELECT * FROM watch_list ORDER BY added_at DESC").fetchall()
+        return [dict(r) for r in res]
+    finally:
+        db.close()
+
+@app.get("/wallets/{address}/unmask")
+def unmask_wallet(address: str):
+    _validate_address(address)
+    real_owner = unmask_proxy(address)
+    return {"proxy": address, "real_owner": real_owner}
+
+
+@app.get("/markets/{market_id}/ai-analysis")
+def get_ai_analysis(
+    market_id: str,
+    research: bool = Query(default=False, description="Enable Tavily web research for news context")
+):
+    """
+    Run AI analysis on a market.
+    Set ?research=true to include Tavily web search context (requires TAVILY_API_KEY).
+    Set ?research=false (default) to skip web search and use price data only.
+    """
+    # Reject non-numeric market IDs — Polymarket IDs are always numeric
+    if not MARKET_ID_RE.match(market_id):
+        raise HTTPException(status_code=400, detail="Invalid market ID format.")
+
+    db = get_db()
+    try:
+        market = db.execute("SELECT * FROM markets WHERE id = ?", (market_id,)).fetchone()
+        if not market:
+            raise HTTPException(status_code=404, detail="Market not found")
+
+        market = dict(market)
+        price_history = None
+
+        if market.get("clob_token_id"):
+            price_history = get_history_as_price_list(market["clob_token_id"])
+
+        if not price_history:
+            raw = db.execute(
+                "SELECT prices FROM snapshots WHERE market_id = ? ORDER BY timestamp DESC LIMIT 5",
+                (market_id,)
+            ).fetchall()
+            price_history = [h['prices'] for h in raw]
+
+        analysis = analyst.analyze_market_shift(
+            market['question'],
+            price_history,
+            market['volume'],
+            use_research=research
+        )
+        return {"analysis": analysis, "research_used": research}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"LLM Analysis failed for {market_id}: {e}")
+        raise HTTPException(status_code=500, detail="AI analysis failed.")
+    finally:
+        db.close()
+
+
+class Target(BaseModel):
+    address: str
+    label: str
+
+    @field_validator('address')
+    @classmethod
+    def validate_address(cls, v):
+        v = v.strip()
+        if not ADDRESS_RE.match(v):
+            raise ValueError("Must be a 42-character 0x Ethereum address.")
+        return v
+
+    @field_validator('label')
+    @classmethod
+    def validate_label(cls, v):
+        v = v.strip()
+        if not v:
+            raise ValueError("Label cannot be empty.")
+        if len(v) > MAX_LABEL_LEN:
+            raise ValueError(f"Label too long (max {MAX_LABEL_LEN} chars).")
+        return v
+
+@app.post("/watchlist")
+def add_to_watchlist(target: Target):
+    db = get_db()
+    try:
+        db.execute(
+            "INSERT INTO watch_list (address, label, added_at) VALUES (?, ?, datetime('now'))",
+            (target.address, target.label)
+        )
+        db.commit()
+        return {"status": "success", "resolved_address": target.address}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Failed to add target: {e}")
+        raise HTTPException(status_code=400, detail="This 0x address is already in your watchlist.")
+    finally:
+        db.close()
+
+@app.get("/wallets/{address}/profile")
+def profile_wallet_api(address: str):
+    _validate_address(address)
+    try:
+        real_owner = unmask_proxy(address)
+
+        from config import Config
+        url = f"{Config.DATA_API}/trades?user={address}&limit=15"
+        resp = requests.get(url, timeout=10)
+        trades_data = resp.json() if resp.status_code == 200 else []
+
+        simplified_trades = [
+            f"Bought {t.get('side')} on '{t.get('title')}' for ${t.get('size')}"
+            for t in trades_data
+        ]
+        profile = analyst.profile_wallet(address, real_owner, simplified_trades)
+
+        return {"profile": profile, "real_owner": real_owner}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Profiling failed: {e}")
+        raise HTTPException(status_code=500, detail="AI Profiling failed.")
+
+@app.delete("/watchlist/{address}")
+def remove_from_watchlist(address: str):
+    _validate_address(address)
+    db = get_db()
+    try:
+        db.execute("DELETE FROM watch_list WHERE address = ?", (address,))
+        db.commit()
+        return {"status": "deleted"}
+    except Exception as e:
+        log.error(f"Failed to delete target {address}: {e}")
+        raise HTTPException(status_code=500, detail="Database error during deletion.")
+    finally:
+        db.close()
+```
+
+## Key Optimization Changes:
+
+### 1. **Database-Level Volume Filtering**
+- Volume filtering now happens in the SQL query using `WHERE` clauses
+- The `volume_floor` logic is incorporated into the database query
+- `COALESCE(volume, 0)` handles potential NULL values
+- Uses `ORDER BY COALESCE(volume, 0) DESC` to prioritize high-volume markets
+
+### 2. **Eliminated Python-Side Filtering**
+- Removed the Python loop that filtered markets after fetching from database
+- Markets are now filtered at the source (database) before being returned
+
+### 3. **Improved Query Construction**
+- Dynamic query building with parameterized queries for safety
+- Clear separation of conditions: search, minimum volume, maximum volume
+- Uses effective minimum volume (max of default floor and user-specified minimum)
+
+### 4. **Performance Benefits**
+- **Reduced I/O**: Database returns only relevant markets
+- **Faster Processing**: No Python-side filtering needed
+- **Better Scalability**: Database indexes on `volume` column can accelerate queries
+- **Lower Memory Usage**: Smaller result sets from database
+
+### 5. **Backward Compatibility**
+- Maintains the same API interface and behavior
+- Same filtering logic, just executed at database level
+- All existing functionality preserved
+
+## Recommended Database Index
+For optimal performance, add an index on the `volume` column in your database:
+```sql
+CREATE INDEX idx_markets_volume ON markets(volume);
+CREATE INDEX idx_markets_question ON markets(question);
+```
+
+This optimization significantly reduces latency by:
+1. Minimizing data transfer from database to application
+2. Leveraging database engine optimizations for filtering
+3. Reducing Python processing overhead
+4. Enabling database query planners to use indexes effectively
+
+The API will now respond faster, especially when dealing with large market datasets, as it avoids fetching low-volume markets that would be filtered out anyway.
