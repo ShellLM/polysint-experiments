@@ -62,8 +62,6 @@ polysint/
 ├── source/
 │   ├── polysint_all_source.txt   # Complete PolySINT source code (single bundled file)
 │   └── codebase/                 # Full unbundled project (api.py, config.py, plugins/, static/, etc.)
-├── audit/
-│   └── initial_security_audit.md # Previous agent8 security audit output
 ├── results/
 │   ├── EXP_001_Security_cns-role-code-audit.md
 │   ├── EXP_002_Security_cns-role-code-audit.md
